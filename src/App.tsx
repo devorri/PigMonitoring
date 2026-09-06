@@ -38,7 +38,7 @@ export function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [isMock, setIsMock] = useState(true);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
-  const [autoSyncEnabled, setAutoSyncEnabled] = useState(true);
+  const [autoSyncEnabled] = useState(true);
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'warning' } | null>(null);
 
   const showToast = (text: string, type: 'success' | 'info' | 'warning' = 'success') => {

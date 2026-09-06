@@ -4,7 +4,6 @@ import {
   Thermometer, 
   Volume2, 
   Activity, 
-  Camera, 
   Play, 
   Pause, 
   VolumeX, 
