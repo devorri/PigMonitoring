@@ -770,6 +770,73 @@ body {
   transition: transform 0.4s ease;
 }
 
+.pig-detection-box {
+  position: absolute;
+  z-index: 2;
+  border: 2px solid #34d399;
+  border-radius: 6px;
+  color: #ecfdf5;
+  background: rgba(5, 150, 105, 0.22);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.3rem 0.4rem;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.pig-detection-box.piglet {
+  border-color: #f59e0b;
+  color: #fffbeb;
+  background: rgba(217, 119, 6, 0.25);
+}
+
+.ai-count-overlay {
+  align-self: flex-start;
+  margin-top: auto;
+  border: 1px solid rgba(52, 211, 153, 0.55);
+  border-radius: 999px;
+  background: rgba(6, 78, 59, 0.78);
+  color: #d1fae5;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.35rem 0.6rem;
+}
+
+.feed-source-toggle {
+  display: flex;
+  background: #f1f5f9;
+  padding: 3px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  gap: 3px;
+}
+
+.source-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #64748b;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.source-btn:hover {
+  color: #0f172a;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.source-btn.active {
+  background: #ffffff;
+  color: #db2777;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
 .camera-frame:hover .snapshot-image {
   transform: scale(1.03);
 }

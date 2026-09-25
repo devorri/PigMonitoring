@@ -49,11 +49,15 @@ export function App() {
   // Initial Data Loader
   const loadAllData = async () => {
     try {
-      const [logsRes, contactsRes, settingsRes] = await Promise.all([
+      const dataRequest = Promise.all([
         fetchSensorLogs(),
         fetchContacts(),
         fetchSystemSettings(),
       ]);
+      const timeout = new Promise<never>((_, reject) => {
+        window.setTimeout(() => reject(new Error('Telemetry request timed out')), 5000);
+      });
+      const [logsRes, contactsRes, settingsRes] = await Promise.race([dataRequest, timeout]);
 
       setLogs(logsRes.data);
       setContacts(contactsRes.data);

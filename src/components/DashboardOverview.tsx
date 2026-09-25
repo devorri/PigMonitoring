@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import * as ort from 'onnxruntime-web';
 import type { SensorLog, SystemSetting } from '../types';
 import { 
   Thermometer, 
@@ -11,7 +12,13 @@ import {
   ArrowRight,
   TrendingUp,
   TrendingDown,
+  Camera,
+  Video,
+  Upload,
 } from 'lucide-react';
+
+const LIVE_CAMERA_FEED_URL = '/camera-stream';
+const PIG_MODEL_URL = '/models/best.onnx';
 
 interface DashboardOverviewProps {
   logs: SensorLog[];
@@ -120,6 +127,187 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   const yLabels = [minTemp, minTemp + tempRange / 2, maxTemp].map(v => Math.round(v * 10) / 10);
 
   const [activeChartPoint, setActiveChartPoint] = useState<SensorLog | null>(null);
+  const cameraImageRef = useRef<HTMLImageElement>(null);
+  const cameraVideoRef = useRef<HTMLVideoElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [feedMode, setFeedMode] = useState<'stream' | 'webcam' | 'video'>('stream');
+  const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
+  const [cameraFeedUrl, setCameraFeedUrl] = useState<string>(LIVE_CAMERA_FEED_URL);
+  const [pigDetections, setPigDetections] = useState<{ bbox: [number, number, number, number]; score: number; label: string }[]>([]);
+  const [aiStatus, setAiStatus] = useState<'loading' | 'ready' | 'blocked'>('loading');
+
+  // Webcam stream management
+  useEffect(() => {
+    if (feedMode !== 'webcam') return;
+    let stream: MediaStream | null = null;
+    navigator.mediaDevices?.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 } } })
+      .then((s) => {
+        stream = s;
+        if (cameraVideoRef.current) {
+          cameraVideoRef.current.srcObject = s;
+          cameraVideoRef.current.play().catch(() => {});
+        }
+      })
+      .catch((err) => {
+        console.warn('Webcam access was not granted or unavailable:', err);
+        setFeedMode('stream');
+      });
+
+    return () => {
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+      if (cameraVideoRef.current) {
+        cameraVideoRef.current.srcObject = null;
+      }
+    };
+  }, [feedMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let detecting = false;
+    let session: ort.InferenceSession | null = null;
+
+    const intersectionOverUnion = (
+      first: [number, number, number, number],
+      second: [number, number, number, number]
+    ) => {
+      const left = Math.max(first[0], second[0]);
+      const top = Math.max(first[1], second[1]);
+      const right = Math.min(first[0] + first[2], second[0] + second[2]);
+      const bottom = Math.min(first[1] + first[3], second[1] + second[3]);
+      const overlap = Math.max(0, right - left) * Math.max(0, bottom - top);
+      const union = first[2] * first[3] + second[2] * second[3] - overlap;
+      return union ? overlap / union : 0;
+    };
+
+    const detectPigs = async () => {
+      let mediaSource: CanvasImageSource | null = null;
+      if (feedMode === 'webcam' || (feedMode === 'video' && uploadedVideoUrl)) {
+        const vid = cameraVideoRef.current;
+        if (vid && vid.readyState >= 2 && !vid.paused && !vid.ended) {
+          mediaSource = vid;
+        }
+      } else {
+        const img = cameraImageRef.current;
+        if (img && img.complete && img.naturalWidth > 0) {
+          mediaSource = img;
+        }
+      }
+
+      if (!mediaSource || detecting) return;
+
+      detecting = true;
+      try {
+        session ??= await ort.InferenceSession.create(PIG_MODEL_URL, {
+          executionProviders: ['wasm'],
+        });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = 640;
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error('Canvas is unavailable');
+
+        context.drawImage(mediaSource, 0, 0, 640, 640);
+        const pixels = context.getImageData(0, 0, 640, 640).data;
+        const input = new Float32Array(3 * 640 * 640);
+
+        for (let pixel = 0; pixel < 640 * 640; pixel += 1) {
+          input[pixel] = pixels[pixel * 4] / 255;
+          input[640 * 640 + pixel] = pixels[pixel * 4 + 1] / 255;
+          input[2 * 640 * 640 + pixel] = pixels[pixel * 4 + 2] / 255;
+        }
+
+        const output = await session.run({
+          [session.inputNames[0]]: new ort.Tensor('float32', input, [1, 3, 640, 640]),
+        });
+        const result = output[session.outputNames[0]];
+        const values = result.data as Float32Array;
+        const dims = result.dims; // e.g. [1, 6, 8400] for YOLOv8
+        const candidates: { bbox: [number, number, number, number]; score: number; label: string }[] = [];
+
+        if (dims && dims.length === 3 && dims[1] === 6) {
+          // YOLOv8 format: [1, 6, 8400]
+          const numAnchors = dims[2];
+          for (let i = 0; i < numAnchors; i += 1) {
+            const scorePig = values[4 * numAnchors + i];
+            const scorePiglet = values[5 * numAnchors + i];
+            const maxScore = Math.max(scorePig, scorePiglet);
+            if (maxScore < 0.25) continue;
+
+            const label = scorePig >= scorePiglet ? 'Pig' : 'Piglet';
+            const cx = values[0 * numAnchors + i];
+            const cy = values[1 * numAnchors + i];
+            const w = values[2 * numAnchors + i];
+            const h = values[3 * numAnchors + i];
+
+            const left = Math.max(0, (cx - w / 2) / 640);
+            const top = Math.max(0, (cy - h / 2) / 640);
+            const width = Math.min(1 - left, w / 640);
+            const height = Math.min(1 - top, h / 640);
+
+            candidates.push({
+              score: maxScore,
+              label,
+              bbox: [left, top, width, height],
+            });
+          }
+        } else {
+          // Transposed [1, 8400, 6] or legacy [1, 25200, 6]
+          const numBoxes = Math.floor(values.length / 6);
+          for (let index = 0; index < numBoxes; index += 1) {
+            const offset = index * 6;
+            const scorePig = values[offset + 4];
+            const scorePiglet = values[offset + 5];
+            const maxScore = Math.max(scorePig, scorePiglet);
+            if (maxScore < 0.25) continue;
+
+            const label = scorePig >= scorePiglet ? 'Pig' : 'Piglet';
+            const cx = values[offset];
+            const cy = values[offset + 1];
+            const w = values[offset + 2];
+            const h = values[offset + 3];
+
+            const left = Math.max(0, (cx - w / 2) / 640);
+            const top = Math.max(0, (cy - h / 2) / 640);
+            const width = Math.min(1 - left, w / 640);
+            const height = Math.min(1 - top, h / 640);
+
+            candidates.push({
+              score: maxScore,
+              label,
+              bbox: [left, top, width, height],
+            });
+          }
+        }
+
+        const selected: typeof candidates = [];
+        for (const candidate of candidates.sort((first, second) => second.score - first.score)) {
+          if (selected.every((existing) => intersectionOverUnion(existing.bbox, candidate.bbox) < 0.45)) {
+            selected.push(candidate);
+          }
+          if (selected.length >= 25) break;
+        }
+
+        if (cancelled) return;
+        setPigDetections(selected);
+        setAiStatus('ready');
+      } catch {
+        if (!cancelled) setAiStatus('blocked');
+      } finally {
+        detecting = false;
+      }
+    };
+
+    detectPigs();
+    const intervalMs = feedMode === 'stream' ? 1500 : 250;
+    const timer = window.setInterval(detectPigs, intervalMs);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [feedMode, uploadedVideoUrl]);
 
   // Prev log comparison
   const prevLog = logs[1];
@@ -358,26 +546,115 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
         {/* Camera + Audio */}
         <div className="dashboard-panel">
-          <div className="panel-header">
+          <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
             <div>
               <h3 className="panel-title">Live Camera Feed</h3>
-              <p className="panel-subtitle">Latest pen snapshot</p>
+              <p className="panel-subtitle">
+                {feedMode === 'webcam' ? 'PC Live Webcam Feed' : feedMode === 'video' ? 'Uploaded Video Clip' : 'Latest pen snapshot / stream'}
+              </p>
             </div>
-            <span className="live-rec-badge">
-              <span className="rec-dot"></span> LIVE
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div className="feed-source-toggle">
+                <button
+                  type="button"
+                  className={`source-btn ${feedMode === 'stream' ? 'active' : ''}`}
+                  onClick={() => setFeedMode('stream')}
+                  title="Pen Camera / Stream"
+                >
+                  <Camera style={{ width: 12, height: 12, marginRight: 4 }} /> Pen
+                </button>
+                <button
+                  type="button"
+                  className={`source-btn ${feedMode === 'webcam' ? 'active' : ''}`}
+                  onClick={() => setFeedMode('webcam')}
+                  title="Live Webcam"
+                >
+                  <Video style={{ width: 12, height: 12, marginRight: 4 }} /> Webcam
+                </button>
+                <button
+                  type="button"
+                  className={`source-btn ${feedMode === 'video' ? 'active' : ''}`}
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Upload Video File"
+                >
+                  <Upload style={{ width: 12, height: 12, marginRight: 4 }} /> Video
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="video/mp4,video/webm,video/ogg"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      const url = URL.createObjectURL(file);
+                      setUploadedVideoUrl(url);
+                      setFeedMode('video');
+                    }
+                  }}
+                />
+              </div>
+              <span className="live-rec-badge">
+                <span className="rec-dot"></span> LIVE
+              </span>
+            </div>
           </div>
 
           <div className="camera-frame">
-            <img
-              src={latestLog.image_url || 'https://images.unsplash.com/photo-1516467508483-a7212febe31a?auto=format&fit=crop&w=1000&q=80'}
-              alt="Pig Pen Live Snapshot"
-              className="snapshot-image"
-            />
+            {feedMode === 'webcam' || (feedMode === 'video' && uploadedVideoUrl) ? (
+              <video
+                ref={cameraVideoRef}
+                src={feedMode === 'video' ? uploadedVideoUrl || undefined : undefined}
+                autoPlay
+                playsInline
+                muted
+                loop
+                className="snapshot-image"
+              />
+            ) : (
+              <img
+                ref={cameraImageRef}
+                src={cameraFeedUrl}
+                onError={() => {
+                  const fallback = latestLog.image_url || 'https://images.unsplash.com/photo-1516467508483-a7212febe31a?auto=format&fit=crop&w=1000&q=80';
+                  if (cameraFeedUrl !== fallback) {
+                    setCameraFeedUrl(fallback);
+                  }
+                }}
+                alt="Pig Pen Live Snapshot"
+                className="snapshot-image"
+                crossOrigin="anonymous"
+              />
+            )}
+            {pigDetections.map((detection, index) => (
+              <div
+                key={`${index}-${detection.bbox.join('-')}`}
+                className={`pig-detection-box ${detection.label === 'Piglet' ? 'piglet' : ''}`}
+                style={{
+                  left: `${detection.bbox[0] * 100}%`,
+                  top: `${detection.bbox[1] * 100}%`,
+                  width: `${detection.bbox[2] * 100}%`,
+                  height: `${detection.bbox[3] * 100}%`,
+                }}
+              >
+                {detection.label} {(detection.score * 100).toFixed(0)}%
+              </div>
+            ))}
             <div className="frame-overlay">
               <div className="overlay-top">
                 <span className="cam-id">CAM-01</span>
                 <span className="overlay-time">{new Date(latestLog.created_at).toLocaleTimeString()}</span>
+              </div>
+              <div className="ai-count-overlay">
+                {aiStatus === 'ready'
+                  ? pigDetections.length === 0
+                    ? '0 pigs detected'
+                    : pigDetections.filter((d) => d.label === 'Piglet').length > 0
+                    ? `${pigDetections.filter((d) => d.label === 'Pig').length} pig${pigDetections.filter((d) => d.label === 'Pig').length === 1 ? '' : 's'}, ${pigDetections.filter((d) => d.label === 'Piglet').length} piglet${pigDetections.filter((d) => d.label === 'Piglet').length === 1 ? '' : 's'}`
+                    : `${pigDetections.length} pig${pigDetections.length === 1 ? '' : 's'} detected`
+                  : aiStatus === 'loading'
+                  ? 'AI analyzing...'
+                  : 'AI offline'}
               </div>
             </div>
           </div>

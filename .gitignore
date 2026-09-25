@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Python & YOLO Temporary Files
+.venv/
+__pycache__/
+*.py[cod]
+runs/
+archive/
