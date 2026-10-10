@@ -253,6 +253,7 @@ export function App() {
                 settings={settings}
                 onNavigateLogs={() => setActiveTab('logs')}
                 onNavigateSettings={() => setActiveTab('settings')}
+                onUpdateSetting={handleUpdateSetting}
               />
             )}
 

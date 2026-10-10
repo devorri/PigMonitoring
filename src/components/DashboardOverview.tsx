@@ -15,16 +15,30 @@ import {
   Camera,
   Video,
   Upload,
+  Lightbulb,
+  Droplets,
+  Power,
 } from 'lucide-react';
 
 const LIVE_CAMERA_FEED_URL = '/camera-stream';
 const PIG_MODEL_URL = '/models/best.onnx';
+
+export interface TrackedPig {
+  id: number;
+  label: string;
+  score: number;
+  bbox: [number, number, number, number]; // [left, top, width, height] normalized
+  isMoving: boolean;
+  displacement: number;
+  stillCount: number;
+}
 
 interface DashboardOverviewProps {
   logs: SensorLog[];
   settings: SystemSetting[];
   onNavigateLogs: () => void;
   onNavigateSettings: () => void;
+  onUpdateSetting?: (key: string, value: string) => void;
 }
 
 export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
@@ -32,6 +46,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   settings,
   onNavigateLogs,
   onNavigateSettings,
+  onUpdateSetting,
 }) => {
   const latestLog = logs[0] || {
     id: 0,
@@ -65,6 +80,24 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   const isLowTemp = latestLog.ambient_temp < lowTempThreshold;
   const isHighNoise = latestAudio > noiseThreshold;
   const isOptimal = !isHighTemp && !isLowTemp && !isHighNoise;
+
+  const getSettingString = (key: string, defaultVal: string): string => {
+    const found = settings.find((s) => s.setting_key === key);
+    return found ? found.setting_value.toLowerCase() : defaultVal;
+  };
+
+  const bulbMode = getSettingString('bulb_mode', 'auto');
+  const solenoidMode = getSettingString('solenoid_mode', 'auto');
+  const solenoidTriggerTemp = getSettingValue('solenoid_trigger_temp', 38.0);
+  const bulbStartHour = getSettingValue('bulb_start_hour', 18);
+  const bulbEndHour = getSettingValue('bulb_end_hour', 6);
+
+  const currentHour = new Date().getHours();
+  const isNightSchedule = currentHour >= bulbStartHour || currentHour < bulbEndHour;
+  const isBulbActive = bulbMode === 'on' || (bulbMode === 'auto' && isNightSchedule);
+
+  const currentMaxTemp = Math.max(latestLog.ambient_temp, latestLog.floor_temp);
+  const isSolenoidActive = solenoidMode === 'on' || (solenoidMode === 'auto' && currentMaxTemp >= solenoidTriggerTemp);
 
   // Audio playback
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
@@ -133,7 +166,9 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   const [feedMode, setFeedMode] = useState<'stream' | 'webcam' | 'video'>('stream');
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
   const [cameraFeedUrl, setCameraFeedUrl] = useState<string>(LIVE_CAMERA_FEED_URL);
-  const [pigDetections, setPigDetections] = useState<{ bbox: [number, number, number, number]; score: number; label: string }[]>([]);
+  const [pigDetections, setPigDetections] = useState<TrackedPig[]>([]);
+  const previousTracksRef = useRef<TrackedPig[]>([]);
+  const nextTrackIdRef = useRef<number>(1);
   const [aiStatus, setAiStatus] = useState<'loading' | 'ready' | 'blocked'>('loading');
 
   // Webcam stream management
@@ -290,8 +325,75 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           if (selected.length >= 25) break;
         }
 
+        // --- Multi-Pig Movement & Spatial Tracking Algorithm ---
+        const prevTracks = previousTracksRef.current;
+        const trackedPigs: TrackedPig[] = [];
+        const matchedPrevIndices = new Set<number>();
+
+        for (const candidate of selected) {
+          const currCenter = {
+            x: candidate.bbox[0] + candidate.bbox[2] / 2,
+            y: candidate.bbox[1] + candidate.bbox[3] / 2,
+          };
+
+          let bestMatchIdx = -1;
+          let bestDist = Infinity;
+
+          for (let pIdx = 0; pIdx < prevTracks.length; pIdx++) {
+            if (matchedPrevIndices.has(pIdx)) continue;
+            const prev = prevTracks[pIdx];
+            const prevCenter = {
+              x: prev.bbox[0] + prev.bbox[2] / 2,
+              y: prev.bbox[1] + prev.bbox[3] / 2,
+            };
+            const d = Math.hypot(currCenter.x - prevCenter.x, currCenter.y - prevCenter.y);
+            const iou = intersectionOverUnion(candidate.bbox, prev.bbox);
+
+            if ((iou > 0.2 || d < 0.15) && d < bestDist) {
+              bestDist = d;
+              bestMatchIdx = pIdx;
+            }
+          }
+
+          if (bestMatchIdx !== -1) {
+            matchedPrevIndices.add(bestMatchIdx);
+            const prevPig = prevTracks[bestMatchIdx];
+            const displacement = bestDist;
+            
+            // Movement threshold: displacement > 0.012 in normalized frame space
+            const movedSignificantly = displacement > 0.012;
+            const newStillCount = movedSignificantly ? 0 : prevPig.stillCount + 1;
+            const isMoving = newStillCount < 2; // still for 2 consecutive cycles means resting
+
+            trackedPigs.push({
+              id: prevPig.id,
+              label: candidate.label,
+              score: candidate.score,
+              bbox: candidate.bbox,
+              isMoving,
+              displacement,
+              stillCount: newStillCount,
+            });
+          } else {
+            const newId = nextTrackIdRef.current++;
+            if (nextTrackIdRef.current > 999) nextTrackIdRef.current = 1;
+
+            trackedPigs.push({
+              id: newId,
+              label: candidate.label,
+              score: candidate.score,
+              bbox: candidate.bbox,
+              isMoving: true,
+              displacement: 0,
+              stillCount: 0,
+            });
+          }
+        }
+
+        previousTracksRef.current = trackedPigs;
+
         if (cancelled) return;
-        setPigDetections(selected);
+        setPigDetections(trackedPigs);
         setAiStatus('ready');
       } catch {
         if (!cancelled) setAiStatus('blocked');
@@ -313,6 +415,12 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   const prevLog = logs[1];
   const tempDiff = prevLog ? +(latestLog.ambient_temp - prevLog.ambient_temp).toFixed(1) : 0;
   const audioDiff = prevLog ? latestLog.audio_level - prevLog.audio_level : 0;
+
+  const movingPigs = pigDetections.filter((d) => d.isMoving);
+  const restingPigs = pigDetections.filter((d) => !d.isMoving);
+  const herdActivityRate = pigDetections.length > 0
+    ? Math.round((movingPigs.length / pigDetections.length) * 100)
+    : 0;
 
   return (
     <div className="dashboard-overview">
@@ -417,6 +525,121 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <span className={`kpi-badge ${latestLog.motion_detected ? 'green' : 'neutral'}`}>
               {latestLog.motion_detected ? 'Movement detected' : 'No movement'}
             </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Actuator & Relay Controls */}
+      <div className="relay-controls-section">
+        <div className="relay-section-header">
+          <div>
+            <h3 className="relay-section-title">Hardware Relay & Actuator Controls</h3>
+            <p className="relay-section-subtitle">Switch between Autonomous mode and Direct Manual overrides for both relays</p>
+          </div>
+          <div className="relay-sync-indicator">
+            <span className="pulse-dot"></span> ESP32 & Supabase Synced
+          </div>
+        </div>
+
+        <div className="relay-cards-grid">
+          {/* Heating Bulb Card */}
+          <div className={`relay-card ${isBulbActive ? 'active' : ''}`}>
+            <div className="relay-card-main">
+              <div className="relay-icon-col">
+                <div className={`relay-icon-bubble ${isBulbActive ? 'active-amber' : ''}`}>
+                  <Lightbulb style={{ width: 22, height: 22 }} />
+                </div>
+              </div>
+              <div className="relay-info-col">
+                <div className="relay-title-row">
+                  <h4 className="relay-title">Heating Bulb Relay (RELAY 1)</h4>
+                  <span className={`relay-status-pill ${isBulbActive ? 'on' : 'off'}`}>
+                    <Power style={{ width: 12, height: 12 }} />
+                    {isBulbActive ? 'ENERGIZED / ON' : 'INACTIVE / OFF'}
+                  </span>
+                </div>
+                <p className="relay-description">
+                  {bulbMode === 'auto'
+                    ? `Auto Mode: Scheduled 6:00 PM – 6:00 AM (${isNightSchedule ? 'Active Now' : 'Daytime Idle'})`
+                    : bulbMode === 'on'
+                    ? 'Manual Override: Forced permanently ON'
+                    : 'Manual Override: Forced permanently OFF'}
+                </p>
+                <div className="relay-actions-row">
+                  <button
+                    type="button"
+                    className={`relay-mode-btn ${bulbMode === 'auto' ? 'active-auto' : ''}`}
+                    onClick={() => onUpdateSetting?.('bulb_mode', 'auto')}
+                  >
+                    Auto (6PM-6AM)
+                  </button>
+                  <button
+                    type="button"
+                    className={`relay-mode-btn ${bulbMode === 'on' ? 'active-on' : ''}`}
+                    onClick={() => onUpdateSetting?.('bulb_mode', 'on')}
+                  >
+                    Force ON
+                  </button>
+                  <button
+                    type="button"
+                    className={`relay-mode-btn ${bulbMode === 'off' ? 'active-off' : ''}`}
+                    onClick={() => onUpdateSetting?.('bulb_mode', 'off')}
+                  >
+                    Force OFF
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Water Solenoid Card */}
+          <div className={`relay-card ${isSolenoidActive ? 'active' : ''}`}>
+            <div className="relay-card-main">
+              <div className="relay-icon-col">
+                <div className={`relay-icon-bubble ${isSolenoidActive ? 'active-blue' : ''}`}>
+                  <Droplets style={{ width: 22, height: 22 }} />
+                </div>
+              </div>
+              <div className="relay-info-col">
+                <div className="relay-title-row">
+                  <h4 className="relay-title">Water Solenoid Relay (RELAY 2)</h4>
+                  <span className={`relay-status-pill ${isSolenoidActive ? 'on-water' : 'off'}`}>
+                    <Power style={{ width: 12, height: 12 }} />
+                    {isSolenoidActive ? 'OPEN / SPRAYING' : 'CLOSED / IDLE'}
+                  </span>
+                </div>
+                <p className="relay-description">
+                  {solenoidMode === 'auto'
+                    ? `Auto Mode: Triggers at ≥${solenoidTriggerTemp}°C (Current peak: ${currentMaxTemp.toFixed(1)}°C)`
+                    : solenoidMode === 'on'
+                    ? 'Manual Override: Forced permanently OPEN'
+                    : 'Manual Override: Forced permanently CLOSED'}
+                </p>
+                <div className="relay-actions-row">
+                  <button
+                    type="button"
+                    className={`relay-mode-btn ${solenoidMode === 'auto' ? 'active-auto' : ''}`}
+                    onClick={() => onUpdateSetting?.('solenoid_mode', 'auto')}
+                  >
+                    Auto (≥38°C)
+                  </button>
+                  <button
+                    type="button"
+                    className={`relay-mode-btn ${solenoidMode === 'on' ? 'active-on' : ''}`}
+                    onClick={() => onUpdateSetting?.('solenoid_mode', 'on')}
+                  >
+                    Force OPEN
+                  </button>
+                  <button
+                    type="button"
+                    className={`relay-mode-btn ${solenoidMode === 'off' ? 'active-off' : ''}`}
+                    onClick={() => onUpdateSetting?.('solenoid_mode', 'off')}
+                  >
+                    Force CLOSED
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -626,10 +849,10 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                 crossOrigin="anonymous"
               />
             )}
-            {pigDetections.map((detection, index) => (
+            {pigDetections.map((detection) => (
               <div
-                key={`${index}-${detection.bbox.join('-')}`}
-                className={`pig-detection-box ${detection.label === 'Piglet' ? 'piglet' : ''}`}
+                key={`pig-track-${detection.id}`}
+                className={`pig-detection-box ${detection.isMoving ? 'moving' : 'resting'} ${detection.label === 'Piglet' ? 'piglet' : ''}`}
                 style={{
                   left: `${detection.bbox[0] * 100}%`,
                   top: `${detection.bbox[1] * 100}%`,
@@ -637,24 +860,41 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                   height: `${detection.bbox[3] * 100}%`,
                 }}
               >
-                {detection.label} {(detection.score * 100).toFixed(0)}%
+                <div className="pig-detection-tag">
+                  <span className={`motion-tag-dot ${detection.isMoving ? 'pulse-moving' : 'still'}`}></span>
+                  <span className="pig-id-text">#{detection.id}</span>
+                  <span className="pig-motion-label">{detection.isMoving ? 'Moving' : 'Resting'}</span>
+                  <span className="pig-conf">{(detection.score * 100).toFixed(0)}%</span>
+                </div>
               </div>
             ))}
             <div className="frame-overlay">
               <div className="overlay-top">
-                <span className="cam-id">CAM-01</span>
+                <span className="cam-id">CAM-01 • AI VISION</span>
                 <span className="overlay-time">{new Date(latestLog.created_at).toLocaleTimeString()}</span>
               </div>
               <div className="ai-count-overlay">
-                {aiStatus === 'ready'
-                  ? pigDetections.length === 0
-                    ? '0 pigs detected'
-                    : pigDetections.filter((d) => d.label === 'Piglet').length > 0
-                    ? `${pigDetections.filter((d) => d.label === 'Pig').length} pig${pigDetections.filter((d) => d.label === 'Pig').length === 1 ? '' : 's'}, ${pigDetections.filter((d) => d.label === 'Piglet').length} piglet${pigDetections.filter((d) => d.label === 'Piglet').length === 1 ? '' : 's'}`
-                    : `${pigDetections.length} pig${pigDetections.length === 1 ? '' : 's'} detected`
-                  : aiStatus === 'loading'
-                  ? 'AI analyzing...'
-                  : 'AI offline'}
+                {aiStatus === 'ready' ? (
+                  pigDetections.length === 0 ? (
+                    '0 pigs in pen'
+                  ) : (
+                    <div className="ai-stats-pill-row">
+                      <span className="ai-stat-chip total">
+                        {pigDetections.length} Total
+                      </span>
+                      <span className="ai-stat-chip moving">
+                        🟢 {movingPigs.length} Moving
+                      </span>
+                      <span className="ai-stat-chip resting">
+                        💤 {restingPigs.length} Resting
+                      </span>
+                    </div>
+                  )
+                ) : aiStatus === 'loading' ? (
+                  'AI tracking pen activity...'
+                ) : (
+                  'AI offline'
+                )}
               </div>
             </div>
           </div>
@@ -670,8 +910,41 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               <span>{latestAudio} dB</span>
             </div>
             <div className="camera-stat">
-              <Activity style={{ width: 14, height: 14, color: latestLog.motion_detected ? '#059669' : '#94a3b8' }} />
-              <span>{latestLog.motion_detected ? 'Motion' : 'Still'}</span>
+              <Activity style={{ width: 14, height: 14, color: movingPigs.length > 0 ? '#059669' : '#94a3b8' }} />
+              <span>{movingPigs.length > 0 ? `${movingPigs.length} Moving` : 'Resting'}</span>
+            </div>
+          </div>
+
+          {/* Real-Time Pig Activity Indicator (Moving vs Resting) */}
+          <div className="pig-motion-indicator-card">
+            <div className="indicator-status-row">
+              <div className="indicator-badge-group">
+                <span className={`live-activity-pill ${movingPigs.length > 0 ? 'moving' : 'resting'}`}>
+                  <span className={`beacon-dot ${movingPigs.length > 0 ? 'pulse-green' : 'still-blue'}`}></span>
+                  {movingPigs.length > 0 ? 'Pigs Moving (Active)' : 'Pigs Resting (Still)'}
+                </span>
+              </div>
+              <div className="indicator-counts-group">
+                <span className="activity-count-badge moving">
+                  🟢 {movingPigs.length} Moving
+                </span>
+                <span className="activity-count-badge resting">
+                  💤 {restingPigs.length} Resting
+                </span>
+              </div>
+            </div>
+
+            <div className="mobility-progress-row">
+              <div className="mobility-label-row">
+                <span className="mobility-label">Herd Mobility Rate</span>
+                <span className="mobility-percentage">{herdActivityRate}% Active</span>
+              </div>
+              <div className="mobility-track">
+                <div 
+                  className="mobility-fill"
+                  style={{ width: `${herdActivityRate}%` }}
+                ></div>
+              </div>
             </div>
           </div>
 

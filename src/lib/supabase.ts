@@ -150,6 +150,36 @@ const INITIAL_SETTINGS: SystemSetting[] = [
     setting_value: 'Automatic (Smart Thermal)',
     updated_at: new Date().toISOString(),
   },
+  {
+    id: 7,
+    setting_key: 'bulb_mode',
+    setting_value: 'auto',
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 8,
+    setting_key: 'solenoid_mode',
+    setting_value: 'auto',
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 9,
+    setting_key: 'solenoid_trigger_temp',
+    setting_value: '38.0',
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 10,
+    setting_key: 'bulb_start_hour',
+    setting_value: '18',
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 11,
+    setting_key: 'bulb_end_hour',
+    setting_value: '6',
+    updated_at: new Date().toISOString(),
+  },
 ];
 
 const SAMPLE_PIG_IMAGES = [
