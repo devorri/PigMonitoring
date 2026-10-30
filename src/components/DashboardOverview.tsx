@@ -59,11 +59,25 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
     audio_url: 'https://actions.google.com/sounds/v1/animals/pig_grunt.ogg',
   };
 
-  const cleanAudioLevel = (val: number): number => {
-    if (isNaN(val) || val <= 0) return 45;
-    if (val > 140) return (val % 40) + 50;
-    return Math.round(val);
+  const formatTemp = (val: number | null | undefined, fallback = '--'): string => {
+    if (val == null || isNaN(Number(val))) return fallback;
+    return Number(val).toFixed(1);
   };
+
+  const cleanAudioLevel = (val: number | null | undefined): number => {
+    if (val == null || isNaN(Number(val)) || Number(val) <= 0) return 45;
+    const num = Number(val);
+    if (num > 140) return (num % 40) + 50;
+    return Math.round(num);
+  };
+
+  const ambientTempNum = latestLog.ambient_temp != null && !isNaN(Number(latestLog.ambient_temp))
+    ? Number(latestLog.ambient_temp)
+    : null;
+
+  const floorTempNum = latestLog.floor_temp != null && !isNaN(Number(latestLog.floor_temp))
+    ? Number(latestLog.floor_temp)
+    : null;
 
   const latestAudio = cleanAudioLevel(latestLog.audio_level);
 
@@ -76,8 +90,8 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   const lowTempThreshold = getSettingValue('temp_threshold_low', 18.0);
   const noiseThreshold = getSettingValue('noise_alert_level', 75);
 
-  const isHighTemp = latestLog.ambient_temp > highTempThreshold;
-  const isLowTemp = latestLog.ambient_temp < lowTempThreshold;
+  const isHighTemp = ambientTempNum !== null && ambientTempNum > highTempThreshold;
+  const isLowTemp = ambientTempNum !== null && ambientTempNum < lowTempThreshold;
   const isHighNoise = latestAudio > noiseThreshold;
   const isOptimal = !isHighTemp && !isLowTemp && !isHighNoise;
 
@@ -96,8 +110,9 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   const isNightSchedule = currentHour >= bulbStartHour || currentHour < bulbEndHour;
   const isBulbActive = bulbMode === 'on' || (bulbMode === 'auto' && isNightSchedule);
 
-  const currentMaxTemp = Math.max(latestLog.ambient_temp, latestLog.floor_temp);
-  const isSolenoidActive = solenoidMode === 'on' || (solenoidMode === 'auto' && currentMaxTemp >= solenoidTriggerTemp);
+  const validTemps = [ambientTempNum, floorTempNum].filter((t): t is number => t !== null);
+  const currentMaxTemp = validTemps.length > 0 ? Math.max(...validTemps) : null;
+  const isSolenoidActive = solenoidMode === 'on' || (solenoidMode === 'auto' && currentMaxTemp !== null && currentMaxTemp >= solenoidTriggerTemp);
 
   // Audio playback
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
@@ -118,8 +133,15 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
   // Chart data
   const chartLogs = [...logs].slice(0, 15).reverse();
-  const maxTemp = Math.max(...chartLogs.map((l) => Math.max(l.ambient_temp, l.floor_temp, 30)), 32);
-  const minTemp = Math.min(...chartLogs.map((l) => Math.min(l.ambient_temp, l.floor_temp, 15)), 12);
+  const allChartTemps = chartLogs
+    .flatMap((l) => [
+      l.ambient_temp != null && !isNaN(Number(l.ambient_temp)) ? Number(l.ambient_temp) : null,
+      l.floor_temp != null && !isNaN(Number(l.floor_temp)) ? Number(l.floor_temp) : null,
+    ])
+    .filter((v): v is number => v !== null);
+
+  const maxTemp = allChartTemps.length > 0 ? Math.max(...allChartTemps, 32) : 32;
+  const minTemp = allChartTemps.length > 0 ? Math.min(...allChartTemps, 15) : 15;
   const tempRange = maxTemp - minTemp || 1;
 
   const svgWidth = 600;
@@ -146,8 +168,19 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
     return d;
   };
 
-  const ambientPts = chartLogs.map((l, i) => ({ x: getX(i), y: getY(l.ambient_temp) }));
-  const floorPts = chartLogs.map((l, i) => ({ x: getX(i), y: getY(l.floor_temp) }));
+  const ambientPts = chartLogs
+    .map((l, i) => {
+      const v = l.ambient_temp != null && !isNaN(Number(l.ambient_temp)) ? Number(l.ambient_temp) : null;
+      return v !== null ? { x: getX(i), y: getY(v) } : null;
+    })
+    .filter((p): p is { x: number; y: number } => p !== null);
+
+  const floorPts = chartLogs
+    .map((l, i) => {
+      const v = l.floor_temp != null && !isNaN(Number(l.floor_temp)) ? Number(l.floor_temp) : null;
+      return v !== null ? { x: getX(i), y: getY(v) } : null;
+    })
+    .filter((p): p is { x: number; y: number } => p !== null);
 
   // Area fill path
   const buildAreaPath = (points: { x: number; y: number }[]) => {
@@ -413,8 +446,17 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
   // Prev log comparison
   const prevLog = logs[1];
-  const tempDiff = prevLog ? +(latestLog.ambient_temp - prevLog.ambient_temp).toFixed(1) : 0;
-  const audioDiff = prevLog ? latestLog.audio_level - prevLog.audio_level : 0;
+  const prevAmbient = prevLog?.ambient_temp != null && !isNaN(Number(prevLog.ambient_temp))
+    ? Number(prevLog.ambient_temp)
+    : null;
+  const prevAudio = prevLog?.audio_level != null ? cleanAudioLevel(prevLog.audio_level) : null;
+
+  const tempDiff = ambientTempNum !== null && prevAmbient !== null
+    ? +(ambientTempNum - prevAmbient).toFixed(1)
+    : 0;
+  const audioDiff = prevAudio !== null
+    ? latestAudio - prevAudio
+    : 0;
 
   const movingPigs = pigDetections.filter((d) => d.isMoving);
   const restingPigs = pigDetections.filter((d) => !d.isMoving);
@@ -430,9 +472,9 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           <div className="status-alert-dot"></div>
           <span className="status-alert-text">
             {isHighTemp
-              ? `High temperature detected: ${latestLog.ambient_temp.toFixed(1)}°C (threshold: ${highTempThreshold}°C)`
+              ? `High temperature detected: ${formatTemp(ambientTempNum)}°C (threshold: ${highTempThreshold}°C)`
               : isLowTemp
-              ? `Low temperature detected: ${latestLog.ambient_temp.toFixed(1)}°C (threshold: ${lowTempThreshold}°C)`
+              ? `Low temperature detected: ${formatTemp(ambientTempNum)}°C (threshold: ${lowTempThreshold}°C)`
               : `High noise level detected: ${latestAudio} dB (threshold: ${noiseThreshold} dB)`}
           </span>
           <button className="status-alert-action" onClick={onNavigateSettings}>
@@ -451,12 +493,12 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <span className="kpi-label">Ambient Temp</span>
           </div>
           <div className="kpi-value-row">
-            <span className="kpi-value">{latestLog.ambient_temp.toFixed(1)}</span>
+            <span className="kpi-value">{formatTemp(ambientTempNum)}</span>
             <span className="kpi-unit">°C</span>
           </div>
           <div className="kpi-footer">
-            <span className={`kpi-badge ${isHighTemp ? 'red' : isLowTemp ? 'amber' : 'green'}`}>
-              {isHighTemp ? 'Above threshold' : isLowTemp ? 'Below threshold' : 'Normal'}
+            <span className={`kpi-badge ${ambientTempNum === null ? 'neutral' : isHighTemp ? 'red' : isLowTemp ? 'amber' : 'green'}`}>
+              {ambientTempNum === null ? 'No data' : isHighTemp ? 'Above threshold' : isLowTemp ? 'Below threshold' : 'Normal'}
             </span>
             {tempDiff !== 0 && (
               <span className={`kpi-trend ${tempDiff > 0 ? 'up' : 'down'}`}>
@@ -475,12 +517,14 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <span className="kpi-label">Floor Temp</span>
           </div>
           <div className="kpi-value-row">
-            <span className="kpi-value">{latestLog.floor_temp.toFixed(1)}</span>
+            <span className="kpi-value">{formatTemp(floorTempNum)}</span>
             <span className="kpi-unit">°C</span>
           </div>
           <div className="kpi-footer">
             <span className="kpi-badge neutral">
-              {(latestLog.ambient_temp - latestLog.floor_temp).toFixed(1)}° difference
+              {ambientTempNum !== null && floorTempNum !== null
+                ? `${(ambientTempNum - floorTempNum).toFixed(1)}° difference`
+                : 'Differential N/A'}
             </span>
           </div>
         </div>
@@ -610,7 +654,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                 </div>
                 <p className="relay-description">
                   {solenoidMode === 'auto'
-                    ? `Auto Mode: Triggers at ≥${solenoidTriggerTemp}°C (Current peak: ${currentMaxTemp.toFixed(1)}°C)`
+                    ? `Auto Mode: Triggers at ≥${solenoidTriggerTemp}°C (Current peak: ${currentMaxTemp !== null ? `${currentMaxTemp.toFixed(1)}°C` : 'N/A'})`
                     : solenoidMode === 'on'
                     ? 'Manual Override: Forced permanently OPEN'
                     : 'Manual Override: Forced permanently CLOSED'}
@@ -711,14 +755,20 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               {/* Data points */}
               {chartLogs.map((log, index) => {
                 const cx = getX(index);
-                const cyAmbient = getY(log.ambient_temp);
-                const cyFloor = getY(log.floor_temp);
+                const ambVal = log.ambient_temp != null && !isNaN(Number(log.ambient_temp)) ? Number(log.ambient_temp) : null;
+                const flrVal = log.floor_temp != null && !isNaN(Number(log.floor_temp)) ? Number(log.floor_temp) : null;
+                const cyAmbient = ambVal !== null ? getY(ambVal) : null;
+                const cyFloor = flrVal !== null ? getY(flrVal) : null;
                 const isSelected = activeChartPoint?.id === log.id;
 
                 return (
                   <g key={log.id} className="chart-point-group" onMouseEnter={() => setActiveChartPoint(log)}>
-                    <circle cx={cx} cy={cyAmbient} r={isSelected ? 5 : 3} fill="#db2777" stroke="#fff" strokeWidth="2" />
-                    <circle cx={cx} cy={cyFloor} r={isSelected ? 4 : 2.5} fill="#f59e0b" stroke="#fff" strokeWidth="2" />
+                    {cyAmbient !== null && (
+                      <circle cx={cx} cy={cyAmbient} r={isSelected ? 5 : 3} fill="#db2777" stroke="#fff" strokeWidth="2" />
+                    )}
+                    {cyFloor !== null && (
+                      <circle cx={cx} cy={cyFloor} r={isSelected ? 4 : 2.5} fill="#f59e0b" stroke="#fff" strokeWidth="2" />
+                    )}
                     {/* Invisible hover target */}
                     <rect x={cx - 15} y={padding} width={30} height={svgHeight - padding * 2} fill="transparent" />
                   </g>
@@ -730,8 +780,8 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               <div className="chart-tooltip">
                 <span className="tooltip-time">{new Date(activeChartPoint.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                 <div className="tooltip-row">
-                  <span style={{ color: '#db2777', fontWeight: 600 }}>{activeChartPoint.ambient_temp.toFixed(1)}°C</span>
-                  <span style={{ color: '#f59e0b', fontWeight: 600 }}>{activeChartPoint.floor_temp.toFixed(1)}°C</span>
+                  <span style={{ color: '#db2777', fontWeight: 600 }}>{formatTemp(activeChartPoint.ambient_temp)}°C</span>
+                  <span style={{ color: '#f59e0b', fontWeight: 600 }}>{formatTemp(activeChartPoint.floor_temp)}°C</span>
                   <span style={{ color: '#64748b' }}>{cleanAudioLevel(activeChartPoint.audio_level)} dB</span>
                 </div>
               </div>
@@ -903,7 +953,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           <div className="camera-stats">
             <div className="camera-stat">
               <Thermometer style={{ width: 14, height: 14, color: '#db2777' }} />
-              <span>{latestLog.ambient_temp.toFixed(1)}°C</span>
+              <span>{formatTemp(ambientTempNum)}°C</span>
             </div>
             <div className="camera-stat">
               <Volume2 style={{ width: 14, height: 14, color: '#6366f1' }} />

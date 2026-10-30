@@ -65,10 +65,10 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
       motionFilter === 'all'
         ? true
         : motionFilter === 'motion'
-        ? log.motion_detected
+        ? Boolean(log.motion_detected)
         : !log.motion_detected;
 
-    const matchesAudio = log.audio_level >= minAudio;
+    const matchesAudio = log.audio_level != null ? log.audio_level >= minAudio : minAudio === 0;
 
     return matchesSearch && matchesMotion && matchesAudio;
   });
@@ -93,7 +93,7 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
     const rows = filteredLogs
       .map(
         (l) =>
-          `${l.id},"${new Date(l.created_at).toISOString()}",${l.ambient_temp},${l.floor_temp},${l.motion_detected},${l.audio_level},"${l.image_url || ''}","${l.audio_url || ''}"`
+          `${l.id},"${new Date(l.created_at).toISOString()}",${l.ambient_temp ?? ''},${l.floor_temp ?? ''},${Boolean(l.motion_detected)},${l.audio_level ?? ''},"${l.image_url || ''}","${l.audio_url || ''}"`
       )
       .join('\n');
     const blob = new Blob([headers + rows], { type: 'text/csv' });
@@ -204,13 +204,13 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
                       </div>
                     </td>
                     <td>
-                      <span className={`temp-badge ${log.ambient_temp > 26.5 ? 'warm' : 'normal'}`}>
+                      <span className={`temp-badge ${log.ambient_temp != null && log.ambient_temp > 26.5 ? 'warm' : 'normal'}`}>
                         <Thermometer className="w-3.5 h-3.5 mr-1 inline" />
-                        {log.ambient_temp}°C
+                        {log.ambient_temp != null ? `${log.ambient_temp}°C` : '--'}
                       </span>
                     </td>
                     <td>
-                      <span className="floor-badge">{log.floor_temp}°C</span>
+                      <span className="floor-badge">{log.floor_temp != null ? `${log.floor_temp}°C` : '--'}</span>
                     </td>
                     <td>
                       <span className={`motion-badge ${log.motion_detected ? 'detected' : 'idle'}`}>
@@ -220,8 +220,8 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
                     </td>
                     <td>
                       <div className="audio-cell">
-                        <span className={`audio-pill ${log.audio_level > 75 ? 'alert' : ''}`}>
-                          {log.audio_level} dB
+                        <span className={`audio-pill ${log.audio_level != null && log.audio_level > 75 ? 'alert' : ''}`}>
+                          {log.audio_level != null ? `${log.audio_level} dB` : '--'}
                         </span>
                       </div>
                     </td>
@@ -277,7 +277,9 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
                   <div className="detail-audio-box">
                     <audio id="modal-audio-element" src={selectedLog.audio_url} onEnded={() => setModalAudioPlaying(false)} />
                     <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium text-slate-300">Audio Clip ({selectedLog.audio_level} dB)</span>
+                      <span className="text-sm font-medium text-slate-300">
+                        Audio Clip ({selectedLog.audio_level != null ? `${selectedLog.audio_level} dB` : 'N/A'})
+                      </span>
                       <button className="audio-play-btn" onClick={toggleModalAudio}>
                         {modalAudioPlaying ? <Pause className="w-4 h-4 mr-1 inline" /> : <Play className="w-4 h-4 mr-1 fill-current inline" />}
                         {modalAudioPlaying ? 'Pause Clip' : 'Play Audio'}
@@ -295,15 +297,21 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
                 </div>
                 <div className="metric-row">
                   <span className="metric-label">Ambient Temperature</span>
-                  <span className="metric-value text-rose-400 font-bold">{selectedLog.ambient_temp}°C</span>
+                  <span className="metric-value text-rose-400 font-bold">
+                    {selectedLog.ambient_temp != null ? `${selectedLog.ambient_temp}°C` : 'N/A'}
+                  </span>
                 </div>
                 <div className="metric-row">
                   <span className="metric-label">Floor Surface Temp</span>
-                  <span className="metric-value text-amber-400 font-bold">{selectedLog.floor_temp}°C</span>
+                  <span className="metric-value text-amber-400 font-bold">
+                    {selectedLog.floor_temp != null ? `${selectedLog.floor_temp}°C` : 'N/A'}
+                  </span>
                 </div>
                 <div className="metric-row">
                   <span className="metric-label">Noise Intensity</span>
-                  <span className="metric-value text-indigo-400 font-bold">{selectedLog.audio_level} dB</span>
+                  <span className="metric-value text-indigo-400 font-bold">
+                    {selectedLog.audio_level != null ? `${selectedLog.audio_level} dB` : 'N/A'}
+                  </span>
                 </div>
                 <div className="metric-row">
                   <span className="metric-label">Motion Sensor State</span>

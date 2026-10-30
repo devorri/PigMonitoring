@@ -5,6 +5,7 @@ import { SensorLogsView } from './components/SensorLogsView';
 import { ContactsView } from './components/ContactsView';
 import { SystemSettingsView } from './components/SystemSettingsView';
 import { SupabaseConfigModal } from './components/SupabaseConfigModal';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import type { 
   Contact, 
   NewContact, 
@@ -22,7 +23,8 @@ import {
   fetchSystemSettings, 
   updateSystemSetting,
   resetLocalDatabase,
-  subscribeToRealtimeChanges
+  subscribeToRealtimeChanges,
+  normalizeSensorLog
 } from './lib/supabase';
 import { CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
 
@@ -82,7 +84,7 @@ export function App() {
       // On Sensor Log Change
       (payload) => {
         if (payload.eventType === 'INSERT' && payload.new) {
-          const newLog = payload.new as SensorLog;
+          const newLog = normalizeSensorLog(payload.new);
           setLogs((prev) => {
             if (prev.some((l) => l.id === newLog.id)) return prev;
             return [newLog, ...prev];
@@ -246,7 +248,7 @@ export function App() {
             <p className="text-slate-400 font-semibold text-sm">Synchronizing Real-Time Telemetry...</p>
           </div>
         ) : (
-          <>
+          <ErrorBoundary>
             {activeTab === 'overview' && (
               <DashboardOverview
                 logs={logs}
@@ -277,7 +279,7 @@ export function App() {
                 onResetDefaults={handleResetDefaults}
               />
             )}
-          </>
+          </ErrorBoundary>
         )}
       </main>
 

@@ -1,10 +1,10 @@
 export interface SensorLog {
   id: number;
   created_at: string;
-  ambient_temp: number;
-  floor_temp: number;
-  motion_detected: boolean;
-  audio_level: number;
+  ambient_temp: number | null;
+  floor_temp: number | null;
+  motion_detected: boolean | null;
+  audio_level: number | null;
   image_url: string | null;
   audio_url: string | null;
 }

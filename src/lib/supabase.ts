@@ -318,6 +318,26 @@ export const deleteContact = async (id: number): Promise<boolean> => {
   return true;
 };
 
+// Normalizer for sensor log payloads from PostgreSQL / Supabase
+export const normalizeSensorLog = (data: any): SensorLog => {
+  const parseNum = (val: any): number | null => {
+    if (val === null || val === undefined || val === '') return null;
+    const n = Number(val);
+    return isNaN(n) ? null : n;
+  };
+
+  return {
+    id: Number(data?.id) || 0,
+    created_at: data?.created_at || new Date().toISOString(),
+    ambient_temp: parseNum(data?.ambient_temp),
+    floor_temp: parseNum(data?.floor_temp),
+    motion_detected: data?.motion_detected === true || data?.motion_detected === 'true' || data?.motion_detected === 1,
+    audio_level: parseNum(data?.audio_level),
+    image_url: data?.image_url || null,
+    audio_url: data?.audio_url || null,
+  };
+};
+
 // Data Layer APIs for Sensor Logs
 export const fetchSensorLogs = async (): Promise<{ data: SensorLog[]; isMock: boolean }> => {
   const client = getSupabaseClient();
@@ -325,7 +345,7 @@ export const fetchSensorLogs = async (): Promise<{ data: SensorLog[]; isMock: bo
     try {
       const { data, error } = await client.from('sensor_logs').select('*').order('created_at', { ascending: false }).limit(100);
       if (!error && data && data.length > 0) {
-        return { data, isMock: false };
+        return { data: data.map(normalizeSensorLog), isMock: false };
       }
     } catch (e) {
       console.warn('Supabase fetch sensor_logs failed, using local mock data', e);
@@ -333,7 +353,7 @@ export const fetchSensorLogs = async (): Promise<{ data: SensorLog[]; isMock: bo
   }
 
   const logs = getLocalData<SensorLog[]>(LOCAL_STORAGE_KEYS.SENSOR_LOGS, generateInitialSensorLogs());
-  return { data: logs, isMock: true };
+  return { data: logs.map(normalizeSensorLog), isMock: true };
 };
 
 export const addSensorLog = async (log: NewSensorLog): Promise<SensorLog> => {
