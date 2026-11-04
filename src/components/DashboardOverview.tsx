@@ -20,7 +20,11 @@ import {
   Power,
 } from 'lucide-react';
 
-const LIVE_CAMERA_FEED_URL = '/camera-stream';
+const SUPABASE_PUBLIC_URL = import.meta.env.VITE_SUPABASE_URL || 'https://rembfnigpvtuxoyjjexf.supabase.co';
+// ESP32-CAM overwrites this file every ~2s (see firmware/pig_esp32cam)
+const LIVE_CAMERA_FEED_BASE = `${SUPABASE_PUBLIC_URL}/storage/v1/object/public/snap/live.jpg`;
+const LIVE_CAMERA_FEED_URL = `${LIVE_CAMERA_FEED_BASE}?t=${Date.now()}`;
+const LIVE_REFRESH_MS = 2000;
 const PIG_MODEL_URL = '/models/best.onnx';
 
 export interface TrackedPig {
@@ -203,6 +207,27 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   const previousTracksRef = useRef<TrackedPig[]>([]);
   const nextTrackIdRef = useRef<number>(1);
   const [aiStatus, setAiStatus] = useState<'loading' | 'ready' | 'blocked'>('loading');
+
+  // ESP32-CAM live feed: preload the newest frame, swap only when it loaded (no flicker)
+  useEffect(() => {
+    if (feedMode !== 'stream') return;
+    let cancelled = false;
+    const refresh = () => {
+      const nextUrl = `${LIVE_CAMERA_FEED_BASE}?t=${Date.now()}`;
+      const preload = new Image();
+      preload.crossOrigin = 'anonymous';
+      preload.onload = () => {
+        if (!cancelled) setCameraFeedUrl(nextUrl);
+      };
+      preload.src = nextUrl;
+    };
+    refresh();
+    const timer = window.setInterval(refresh, LIVE_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [feedMode]);
 
   // Webcam stream management
   useEffect(() => {
