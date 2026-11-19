@@ -9,9 +9,9 @@
 }
 
 .at-drop {
-  border: 2px dashed #f9a8d4;
+  border: 1px dashed #c9d1cc;
   border-radius: 14px;
-  background: #fdf2f8;
+  background: var(--surface-2);
   padding: 2rem 1rem;
   text-align: center;
   cursor: pointer;
@@ -19,8 +19,8 @@
 }
 .at-drop:hover,
 .at-drop.over {
-  background: #fce7f3;
-  border-color: #db2777;
+  background: var(--line-2);
+  border-color: var(--brand);
 }
 .at-drop.disabled {
   opacity: 0.55;
@@ -29,16 +29,16 @@
 .at-drop-icon {
   width: 32px;
   height: 32px;
-  color: #db2777;
+  color: var(--brand);
 }
 .at-drop-title {
   font-weight: 700;
-  color: #831843;
+  color: var(--ink);
   margin-top: 0.5rem;
 }
 .at-drop-sub {
   font-size: 0.8rem;
-  color: #64748b;
+  color: var(--muted);
   margin-top: 0.25rem;
 }
 
@@ -61,31 +61,31 @@
   flex-direction: column;
   gap: 0.25rem;
   font-size: 0.8rem;
-  color: #475569;
+  color: var(--ink-2);
   min-width: 220px;
 }
 .at-slider em {
-  color: #d97706;
+  color: var(--warn);
   font-style: normal;
 }
 .at-slider input {
-  accent-color: #db2777;
+  accent-color: var(--brand);
 }
 .at-check {
   display: flex;
   align-items: center;
   gap: 0.4rem;
   font-size: 0.8rem;
-  color: #475569;
+  color: var(--ink-2);
 }
 .at-check input {
-  accent-color: #db2777;
+  accent-color: var(--brand);
 }
 .at-stop-btn {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  background: #dc2626;
+  background: var(--alert);
   color: #fff;
   border: none;
   border-radius: 10px;
@@ -107,24 +107,24 @@
   align-items: center;
   gap: 0.5rem 0.6rem;
   font-size: 0.85rem;
-  color: #475569;
+  color: var(--ink-2);
 }
 .at-bar {
   grid-column: 1 / -1;
   height: 6px;
-  background: #fce7f3;
+  background: var(--line-2);
   border-radius: 99px;
   overflow: hidden;
 }
 .at-bar div {
   height: 100%;
-  background: linear-gradient(90deg, #f472b6, #db2777);
+  background: var(--brand);
   transition: width 0.2s;
 }
 .at-spin {
   width: 18px;
   height: 18px;
-  color: #db2777;
+  color: var(--brand);
   animation: at-rot 1s linear infinite;
 }
 @keyframes at-rot {
@@ -137,9 +137,9 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  color: #991b1b;
-  background: #fef2f2;
-  border: 1px solid #fecaca;
+  color: var(--alert);
+  background: var(--alert-wash);
+  border: 1px solid #f0c9c3;
   border-radius: 10px;
   padding: 0.7rem 0.9rem;
   font-size: 0.85rem;
@@ -154,14 +154,14 @@
   margin-bottom: 1rem;
 }
 .at-verdict.cough {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: #991b1b;
+  background: var(--alert-wash);
+  border: 1px solid #f0c9c3;
+  color: var(--alert);
 }
 .at-verdict.clear {
-  background: #ecfdf5;
-  border: 1px solid #a7f3d0;
-  color: #065f46;
+  background: var(--ok-wash);
+  border: 1px solid #cfe5da;
+  color: var(--ok);
 }
 .at-verdict-icon {
   width: 36px;
@@ -185,17 +185,17 @@
   flex-wrap: wrap;
   gap: 0.5rem;
   font-size: 0.8rem;
-  color: #475569;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
   border-radius: 10px;
   padding: 0.55rem 0.8rem;
   margin-bottom: 0.75rem;
 }
 .at-note.warn {
-  background: #fffbeb;
-  border-color: #fde68a;
-  color: #92400e;
+  background: var(--warn-wash);
+  border-color: #efdcb5;
+  color: #7a520f;
 }
 
 .at-audio {
@@ -204,7 +204,7 @@
 }
 
 .at-timeline {
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--line);
   border-radius: 12px;
   padding: 0.75rem;
 }
@@ -215,7 +215,7 @@
   gap: 0.5rem;
   font-size: 0.75rem;
   font-weight: 700;
-  color: #9d174d;
+  color: var(--ink-2);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin-bottom: 0.4rem;
@@ -225,7 +225,7 @@
   align-items: center;
   gap: 0.35rem;
   font-weight: 500;
-  color: #64748b;
+  color: var(--muted);
   text-transform: none;
   letter-spacing: 0;
 }
@@ -236,9 +236,9 @@
   border-radius: 2px;
   margin-left: 0.4rem;
 }
-.lg-cough { background: #dc2626; }
-.lg-rej { background: #94a3b8; }
-.lg-quiet { background: #e2e8f0; }
+.lg-cough { background: var(--alert); }
+.lg-rej { background: var(--muted); }
+.lg-quiet { background: var(--line); }
 
 .at-svg {
   width: 100%;
@@ -246,32 +246,32 @@
   cursor: pointer;
   display: block;
 }
-.at-win { fill: #f9a8d4; }
-.at-win.hi { fill: #db2777; }
-.at-quiet { fill: #e2e8f0; }
+.at-win { fill: var(--line); }
+.at-win.hi { fill: var(--brand); }
+.at-quiet { fill: var(--line); }
 .at-thr {
-  stroke: #d97706;
+  stroke: var(--warn);
   stroke-dasharray: 6 4;
   stroke-width: 1.5;
   vector-effect: non-scaling-stroke;
 }
 .at-mark-cough {
-  stroke: #dc2626;
+  stroke: var(--alert);
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
 }
 .at-mark-rej {
-  stroke: #94a3b8;
+  stroke: var(--muted);
   stroke-width: 1;
   stroke-dasharray: 3 3;
   vector-effect: non-scaling-stroke;
 }
-.at-dot { fill: #dc2626; }
+.at-dot { fill: var(--alert); }
 .at-axis {
   display: flex;
   justify-content: space-between;
   font-size: 0.7rem;
-  color: #94a3b8;
+  color: var(--muted);
   margin-top: 0.2rem;
 }
 
@@ -281,7 +281,7 @@
 .at-list h3 {
   font-size: 0.85rem;
   font-weight: 700;
-  color: #831843;
+  color: var(--ink);
   margin: 0 0 0.5rem;
 }
 .at-toggle {
@@ -290,7 +290,7 @@
   gap: 0.35rem;
   background: none;
   border: none;
-  color: #64748b;
+  color: var(--muted);
   font-size: 0.82rem;
   font-weight: 600;
   cursor: pointer;
@@ -301,20 +301,20 @@
   display: flex;
   align-items: flex-start;
   gap: 0.75rem;
-  border: 1px solid #e2e8f0;
-  border-left: 4px solid #dc2626;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--alert);
   border-radius: 10px;
   padding: 0.6rem 0.75rem;
   margin-bottom: 0.5rem;
 }
 .at-row.no {
-  border-left-color: #94a3b8;
-  background: #f8fafc;
+  border-left-color: var(--muted);
+  background: var(--surface-2);
 }
 .at-play {
-  border: 1px solid #fbcfe8;
-  background: #fdf2f8;
-  color: #db2777;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--brand);
   border-radius: 8px;
   width: 32px;
   height: 32px;
@@ -335,34 +335,34 @@
   font-size: 0.85rem;
 }
 .at-pill {
-  background: #fce7f3;
-  color: #9d174d;
+  background: var(--line-2);
+  color: var(--ink-2);
   border-radius: 99px;
   padding: 0.1rem 0.55rem;
   font-size: 0.75rem;
   font-weight: 600;
 }
 .at-pill.muted {
-  background: #f1f5f9;
-  color: #475569;
+  background: var(--line-2);
+  color: var(--ink-2);
   font-weight: 500;
 }
 .at-reasons {
   font-size: 0.78rem;
-  color: #64748b;
+  color: var(--muted);
   margin-top: 0.3rem;
 }
 
 .at-how h3 {
   font-size: 0.95rem;
-  color: #831843;
+  color: var(--ink);
   margin: 0 0 0.5rem;
 }
 .at-how ol {
   margin: 0;
   padding-left: 1.2rem;
   font-size: 0.85rem;
-  color: #475569;
+  color: var(--ink-2);
   line-height: 1.6;
 }
 

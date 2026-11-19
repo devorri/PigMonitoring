@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as ort from 'onnxruntime-web';
-import type { SensorLog, SystemSetting } from '../types';
+import type { AudioDetection, SensorLog, SmsLog, SystemSetting } from '../types';
+import { SMS_TYPE_LABEL } from '../lib/sms';
+import { PI_OFFLINE_AFTER_S, parseRelayState, settingNumber, settingValue } from '../lib/settingsSpec';
 import { 
   Thermometer, 
   Volume2, 
@@ -18,6 +20,7 @@ import {
   Lightbulb,
   Droplets,
   Power,
+  HeartPulse,
 } from 'lucide-react';
 
 const SUPABASE_PUBLIC_URL = import.meta.env.VITE_SUPABASE_URL || 'https://rembfnigpvtuxoyjjexf.supabase.co';
@@ -53,6 +56,9 @@ export interface TrackedPig {
 interface DashboardOverviewProps {
   logs: SensorLog[];
   settings: SystemSetting[];
+  audioDetections: AudioDetection[];
+  smsLogs: SmsLog[];
+  section: 'overview' | 'controls' | 'camera';
   onNavigateLogs: () => void;
   onNavigateSettings: () => void;
   onUpdateSetting?: (key: string, value: string) => void;
@@ -61,19 +67,22 @@ interface DashboardOverviewProps {
 export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   logs,
   settings,
+  audioDetections,
+  smsLogs,
+  section,
   onNavigateLogs,
-  onNavigateSettings,
   onUpdateSetting,
 }) => {
-  const latestLog = logs[0] || {
+  // No logs yet -> show empty values, never made-up numbers
+  const latestLog: SensorLog = logs[0] || {
     id: 0,
     created_at: new Date().toISOString(),
-    ambient_temp: 22.4,
-    floor_temp: 20.8,
-    motion_detected: true,
-    audio_level: 52,
-    image_url: 'https://images.unsplash.com/photo-1516467508483-a7212febe31a?auto=format&fit=crop&w=1000&q=80',
-    audio_url: 'https://actions.google.com/sounds/v1/animals/pig_grunt.ogg',
+    ambient_temp: null,
+    floor_temp: null,
+    motion_detected: null,
+    audio_level: null,
+    image_url: null,
+    audio_url: null,
   };
 
   const formatTemp = (val: number | null | undefined, fallback = '--'): string => {
@@ -81,12 +90,19 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
     return Number(val).toFixed(1);
   };
 
-  const cleanAudioLevel = (val: number | null | undefined): number => {
-    if (val == null || isNaN(Number(val)) || Number(val) <= 0) return 45;
-    const num = Number(val);
-    if (num > 140) return (num % 40) + 50;
-    return Math.round(num);
+  // Exactly the dB the Pi saved (null = no reading). For bar heights use ?? 0.
+  const cleanAudioLevel = (val: number | null | undefined): number | null => {
+    if (val == null || isNaN(Number(val))) return null;
+    return Math.round(Number(val));
   };
+  const fmtDb = (val: number | null) => (val == null ? '--' : String(val));
+
+  // 1s clock for "x min ago" and the heat protection countdown
+  const [nowSec, setNowSec] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    const id = window.setInterval(() => setNowSec(Date.now() / 1000), 1000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const ambientTempNum = latestLog.ambient_temp != null && !isNaN(Number(latestLog.ambient_temp))
     ? Number(latestLog.ambient_temp)
@@ -98,38 +114,48 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
   const latestAudio = cleanAudioLevel(latestLog.audio_level);
 
-  const getSettingValue = (key: string, defaultVal: number): number => {
-    const found = settings.find((s) => s.setting_key === key);
-    return found ? parseFloat(found.setting_value) || defaultVal : defaultVal;
-  };
+  // Every threshold / mode comes from the shared settings spec = the values the Pi is using
+  const solenoidTriggerTemp = settingNumber(settings, 'solenoid_trigger_temp');
+  const lowTempThreshold = settingNumber(settings, 'temp_threshold_low');
+  const noiseThreshold = settingNumber(settings, 'noise_alert_level');
+  const bulbMode = settingValue(settings, 'bulb_mode');
+  const solenoidMode = settingValue(settings, 'solenoid_mode');
+  const bulbStartHour = settingNumber(settings, 'bulb_start_hour');
+  const bulbEndHour = settingNumber(settings, 'bulb_end_hour');
+  const fmtHour = (h: number) => `${((h + 11) % 12) + 1}:00 ${h < 12 ? 'AM' : 'PM'}`;
 
-  const highTempThreshold = getSettingValue('temp_threshold_high', 26.5);
-  const lowTempThreshold = getSettingValue('temp_threshold_low', 18.0);
-  const noiseThreshold = getSettingValue('noise_alert_level', 75);
-
-  const isHighTemp = ambientTempNum !== null && ambientTempNum > highTempThreshold;
+  const peakNow = [ambientTempNum, floorTempNum].filter((t): t is number => t !== null);
+  const peakTempNum = peakNow.length ? Math.max(...peakNow) : null;
+  // High = the Pi's heat protection trigger (hottest of ambient / floor), exactly like the Pi
+  const isHighTemp = peakTempNum !== null && peakTempNum >= solenoidTriggerTemp;
   const isLowTemp = ambientTempNum !== null && ambientTempNum < lowTempThreshold;
-  const isHighNoise = latestAudio > noiseThreshold;
-  const isOptimal = !isHighTemp && !isLowTemp && !isHighNoise;
+  const isHighNoise = latestAudio !== null && latestAudio > noiseThreshold;
 
-  const getSettingString = (key: string, defaultVal: string): string => {
-    const found = settings.find((s) => s.setting_key === key);
-    return found ? found.setting_value.toLowerCase() : defaultVal;
-  };
-
-  const bulbMode = getSettingString('bulb_mode', 'auto');
-  const solenoidMode = getSettingString('solenoid_mode', 'auto');
-  const solenoidTriggerTemp = getSettingValue('solenoid_trigger_temp', 38.0);
-  const bulbStartHour = getSettingValue('bulb_start_hour', 18);
-  const bulbEndHour = getSettingValue('bulb_end_hour', 6);
+  // Latest audio AI result from the Pi (audio_detections)
+  const latestDet = audioDetections[0] ?? null;
+  const detAgeMin = latestDet ? Math.max(0, Math.round((nowSec * 1000 - new Date(latestDet.created_at).getTime()) / 60000)) : null;
+  const detFresh = detAgeMin !== null && detAgeMin <= 10;
+  const isAudioAttention = detFresh && latestDet?.status === 'ATTENTION NEEDED';
 
   const currentHour = new Date().getHours();
   const isNightSchedule = currentHour >= bulbStartHour || currentHour < bulbEndHour;
-  const isBulbActive = bulbMode === 'on' || (bulbMode === 'auto' && isNightSchedule);
 
-  const validTemps = [ambientTempNum, floorTempNum].filter((t): t is number => t !== null);
-  const currentMaxTemp = validTemps.length > 0 ? Math.max(...validTemps) : null;
-  const isSolenoidActive = solenoidMode === 'on' || (solenoidMode === 'auto' && currentMaxTemp !== null && currentMaxTemp >= solenoidTriggerTemp);
+  const currentMaxTemp = peakTempNum;
+
+  // REAL relay state written by the Pi (system_settings.relay_state, JSON, every change + every 30s)
+  const relayRaw = parseRelayState(settings);
+  const piRelay = relayRaw && nowSec - relayRaw.t < PI_OFFLINE_AFTER_S ? relayRaw : null; // stale -> Pi offline
+  const relayLive = piRelay !== null;
+  const coolingPhase = piRelay?.phase ?? 'idle';
+  const coolingLeft = piRelay ? Math.max(0, Math.round(piRelay.left - (nowSec - piRelay.t))) : 0;
+  const fmtLeft = `${Math.floor(coolingLeft / 60)}:${String(coolingLeft % 60).padStart(2, '0')}`;
+
+  // Estimate (only used when the Pi isn't reporting): heat protection works in auto AND off
+  const estHeat = solenoidMode !== 'on' && currentMaxTemp !== null && currentMaxTemp >= solenoidTriggerTemp;
+  const isSolenoidActive = relayLive ? piRelay.solenoid : solenoidMode === 'on' || estHeat;
+  const isBulbActive = relayLive
+    ? piRelay.bulb
+    : !estHeat && (bulbMode === 'on' || (bulbMode === 'auto' && isNightSchedule));
 
   // Audio playback
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
@@ -520,12 +546,12 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   const prevAmbient = prevLog?.ambient_temp != null && !isNaN(Number(prevLog.ambient_temp))
     ? Number(prevLog.ambient_temp)
     : null;
-  const prevAudio = prevLog?.audio_level != null ? cleanAudioLevel(prevLog.audio_level) : null;
+  const prevAudio = cleanAudioLevel(prevLog?.audio_level);
 
   const tempDiff = ambientTempNum !== null && prevAmbient !== null
     ? +(ambientTempNum - prevAmbient).toFixed(1)
     : 0;
-  const audioDiff = prevAudio !== null
+  const audioDiff = prevAudio !== null && latestAudio !== null
     ? latestAudio - prevAudio
     : 0;
 
@@ -537,23 +563,60 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
   return (
     <div className="dashboard-overview">
-      {/* Status bar */}
-      {!isOptimal && (
-        <div className="status-alert-bar">
-          <div className="status-alert-dot"></div>
-          <span className="status-alert-text">
-            {isHighTemp
-              ? `High temperature detected: ${formatTemp(ambientTempNum)}°C (threshold: ${highTempThreshold}°C)`
-              : isLowTemp
-              ? `Low temperature detected: ${formatTemp(ambientTempNum)}°C (threshold: ${lowTempThreshold}°C)`
-              : `High noise level detected: ${latestAudio} dB (threshold: ${noiseThreshold} dB)`}
-          </span>
-          <button className="status-alert-action" onClick={onNavigateSettings}>
-            Adjust Thresholds
-          </button>
-        </div>
-      )}
+      {/* Status line: the one thing to read first */}
+      {section === 'overview' && (() => {
+        const ago = (iso: string) => {
+          const m = Math.max(0, Math.round((nowSec * 1000 - new Date(iso).getTime()) / 60000));
+          return m === 0 ? 'just now' : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+        };
+        let tone: 'ok' | 'warn' | 'alert' | 'idle' = 'ok';
+        let title = 'All good in the pen';
+        let detail = logs.length
+          ? `Ambient ${formatTemp(ambientTempNum)}°C, floor ${formatTemp(floorTempNum)}°C, noise ${fmtDb(latestAudio)} dB. Last reading ${ago(latestLog.created_at)}.`
+          : '';
+        if (!logs.length) {
+          tone = 'idle';
+          title = 'Waiting for the first reading';
+          detail = 'Readings appear here as soon as the Raspberry Pi starts sending them.';
+        } else if (coolingPhase === 'spraying') {
+          tone = 'alert';
+          title = 'Cooling the pen';
+          detail = `Heat ${piRelay?.temp ?? formatTemp(peakTempNum)}°C reached the ${solenoidTriggerTemp}°C limit. Water is on, ${fmtLeft} left in cycle ${piRelay?.cycle}.`;
+        } else if (coolingPhase === 'waiting') {
+          tone = 'warn';
+          title = 'Checking if the pen cooled down';
+          detail = `Water paused after cycle ${piRelay?.cycle}. Re-checking the temperature in ${fmtLeft}.`;
+        } else if (isHighTemp) {
+          tone = 'alert';
+          title = 'It is too hot in the pen';
+          detail = `${formatTemp(peakTempNum)}°C is at or above the ${solenoidTriggerTemp}°C limit. Heat protection turns the water on.`;
+        } else if (isAudioAttention) {
+          tone = 'warn';
+          title = (latestDet?.cough_events ?? 0) > 0 ? 'Coughing heard in the pen' : 'Stress sounds heard in the pen';
+          detail = `${latestDet?.cough_events} cough and ${latestDet?.stress_events} stress sounds, ${ago(latestDet!.created_at)}. Listen to the clip in Sound.`;
+        } else if (isLowTemp) {
+          tone = 'warn';
+          title = 'The pen is getting cold';
+          detail = `Ambient ${formatTemp(ambientTempNum)}°C is below ${lowTempThreshold}°C.`;
+        } else if (isHighNoise) {
+          tone = 'warn';
+          title = 'It is loud in the pen';
+          detail = `Noise ${fmtDb(latestAudio)} dB is above ${noiseThreshold} dB.`;
+        }
+        return (
+          <section className={`status-hero tone-${tone}`}>
+            <span className="status-hero-dot" aria-hidden="true" />
+            <div>
+              <h2 className="status-hero-title">{title}</h2>
+              {detail && <p className="status-hero-detail">{detail}</p>}
+            </div>
+            <span className={`status-hero-pi ${relayLive ? 'on' : 'off'}`}>{relayLive ? 'Pi online' : 'Pi offline'}</span>
+          </section>
+        );
+      })()}
 
+      {section === 'overview' && (
+        <>
       {/* KPI Cards */}
       <div className="kpi-grid">
         <div className="kpi-card">
@@ -561,15 +624,15 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <div className="kpi-icon-circle pink">
               <Thermometer style={{ width: 18, height: 18 }} />
             </div>
-            <span className="kpi-label">Ambient Temp</span>
+            <span className="kpi-label">Ambient</span>
           </div>
           <div className="kpi-value-row">
             <span className="kpi-value">{formatTemp(ambientTempNum)}</span>
             <span className="kpi-unit">°C</span>
           </div>
           <div className="kpi-footer">
-            <span className={`kpi-badge ${ambientTempNum === null ? 'neutral' : isHighTemp ? 'red' : isLowTemp ? 'amber' : 'green'}`}>
-              {ambientTempNum === null ? 'No data' : isHighTemp ? 'Above threshold' : isLowTemp ? 'Below threshold' : 'Normal'}
+            <span className={`kpi-badge ${ambientTempNum === null ? 'neutral' : ambientTempNum >= solenoidTriggerTemp ? 'red' : isLowTemp ? 'amber' : 'green'}`}>
+              {ambientTempNum === null ? 'No data' : ambientTempNum >= solenoidTriggerTemp ? `≥ ${solenoidTriggerTemp}°C heat` : isLowTemp ? 'Below threshold' : 'Normal'}
             </span>
             {tempDiff !== 0 && (
               <span className={`kpi-trend ${tempDiff > 0 ? 'up' : 'down'}`}>
@@ -585,17 +648,21 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <div className="kpi-icon-circle amber">
               <Layers style={{ width: 18, height: 18 }} />
             </div>
-            <span className="kpi-label">Floor Temp</span>
+            <span className="kpi-label">Floor</span>
           </div>
           <div className="kpi-value-row">
             <span className="kpi-value">{formatTemp(floorTempNum)}</span>
             <span className="kpi-unit">°C</span>
           </div>
           <div className="kpi-footer">
-            <span className="kpi-badge neutral">
-              {ambientTempNum !== null && floorTempNum !== null
+            <span className={`kpi-badge ${floorTempNum === null ? 'neutral' : floorTempNum >= solenoidTriggerTemp ? 'red' : 'neutral'}`}>
+              {floorTempNum === null
+                ? 'No data'
+                : floorTempNum >= solenoidTriggerTemp
+                ? `≥ ${solenoidTriggerTemp}°C heat`
+                : ambientTempNum !== null
                 ? `${(ambientTempNum - floorTempNum).toFixed(1)}° difference`
-                : 'Differential N/A'}
+                : 'Normal'}
             </span>
           </div>
         </div>
@@ -605,15 +672,15 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <div className="kpi-icon-circle indigo">
               <Volume2 style={{ width: 18, height: 18 }} />
             </div>
-            <span className="kpi-label">Noise Level</span>
+            <span className="kpi-label">Noise</span>
           </div>
           <div className="kpi-value-row">
-            <span className="kpi-value">{latestAudio}</span>
+            <span className="kpi-value">{fmtDb(latestAudio)}</span>
             <span className="kpi-unit">dB</span>
           </div>
           <div className="kpi-footer">
-            <span className={`kpi-badge ${isHighNoise ? 'red' : 'green'}`}>
-              {isHighNoise ? 'High noise' : 'Quiet'}
+            <span className={`kpi-badge ${latestAudio === null ? 'neutral' : isHighNoise ? 'red' : 'green'}`}>
+              {latestAudio === null ? 'No data' : isHighNoise ? 'High noise' : 'Quiet'}
             </span>
             {audioDiff !== 0 && (
               <span className={`kpi-trend ${audioDiff > 0 ? 'up' : 'down'}`}>
@@ -633,26 +700,56 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           </div>
           <div className="kpi-value-row">
             <span className={`kpi-value-text ${latestLog.motion_detected ? 'active' : 'idle'}`}>
-              {latestLog.motion_detected ? 'Active' : 'Resting'}
+              {latestLog.motion_detected == null ? 'No data' : latestLog.motion_detected ? 'Active' : 'Resting'}
             </span>
           </div>
           <div className="kpi-footer">
             <span className={`kpi-badge ${latestLog.motion_detected ? 'green' : 'neutral'}`}>
-              {latestLog.motion_detected ? 'Movement detected' : 'No movement'}
+              {latestLog.motion_detected == null ? 'No reading' : latestLog.motion_detected ? 'Movement detected' : 'No movement'}
             </span>
           </div>
         </div>
-      </div>
 
+        <div className="kpi-card">
+          <div className="kpi-header">
+            <div className={`kpi-icon-circle ${!latestDet ? 'slate' : latestDet.status === 'ATTENTION NEEDED' ? 'pink' : 'green'}`}>
+              <HeartPulse style={{ width: 18, height: 18 }} />
+            </div>
+            <span className="kpi-label">Sound</span>
+          </div>
+          <div className="kpi-value-row">
+            <span className={`kpi-value-text ${latestDet?.status === 'ATTENTION NEEDED' ? 'active' : 'idle'}`}>
+              {!latestDet ? 'No data' : latestDet.status === 'ATTENTION NEEDED' ? 'Attention' : 'Healthy'}
+            </span>
+          </div>
+          <div className="kpi-footer">
+            <span className={`kpi-badge ${!latestDet ? 'neutral' : latestDet.status === 'ATTENTION NEEDED' ? 'red' : 'green'}`}>
+              {!latestDet
+                ? 'Pi has not sent audio yet'
+                : `${latestDet.cough_events} cough · ${latestDet.stress_events} stress`}
+            </span>
+            {latestDet && (
+              <span className="kpi-trend" title={`${latestDet.top_class ?? ''} · ${new Date(latestDet.created_at).toLocaleString()}`}>
+                {detAgeMin === 0 ? 'now' : `${detAgeMin}m ago`}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+        </>
+      )}
+
+      {section === 'controls' && (
+        <>
       {/* Actuator & Relay Controls */}
       <div className="relay-controls-section">
         <div className="relay-section-header">
           <div>
-            <h3 className="relay-section-title">Hardware Relay & Actuator Controls</h3>
-            <p className="relay-section-subtitle">Switch between Autonomous mode and Direct Manual overrides for both relays</p>
+            <h3 className="relay-section-title">Relays</h3>
+            <p className="relay-section-subtitle">Pick a mode for each relay. Heat protection always overrides at ≥{solenoidTriggerTemp}°C.</p>
           </div>
-          <div className="relay-sync-indicator">
-            <span className="pulse-dot"></span> ESP32 & Supabase Synced
+          <div className={`relay-sync-indicator ${relayLive ? '' : 'offline'}`}>
+            <span className="pulse-dot"></span> {relayLive ? 'Pi online · live' : 'Pi offline · estimated'}
           </div>
         </div>
 
@@ -667,18 +764,22 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               </div>
               <div className="relay-info-col">
                 <div className="relay-title-row">
-                  <h4 className="relay-title">Heating Bulb Relay (RELAY 1)</h4>
+                  <h4 className="relay-title">Heating bulb</h4>
                   <span className={`relay-status-pill ${isBulbActive ? 'on' : 'off'}`}>
                     <Power style={{ width: 12, height: 12 }} />
-                    {isBulbActive ? 'ENERGIZED / ON' : 'INACTIVE / OFF'}
+                    {isBulbActive ? 'On' : 'Off'}
                   </span>
                 </div>
                 <p className="relay-description">
-                  {bulbMode === 'auto'
-                    ? `Auto Mode: Scheduled 6:00 PM – 6:00 AM (${isNightSchedule ? 'Active Now' : 'Daytime Idle'})`
+                  {coolingPhase !== 'idle'
+                    ? 'Forced OFF by heat protection while the pen cools down'
+                    : bulbMode === 'auto'
+                    ? `Auto: on from ${fmtHour(bulbStartHour)} to ${fmtHour(bulbEndHour)} (${isNightSchedule ? 'on now' : 'off now'})`
                     : bulbMode === 'on'
-                    ? 'Manual Override: Forced permanently ON'
-                    : 'Manual Override: Forced permanently OFF'}
+                    ? 'Always on'
+                    : 'Always off'}
+                  <br />
+                  <small style={{ opacity: 0.7 }}>{relayLive ? '● Live from the Pi' : '○ Pi not reporting, estimated'}</small>
                 </p>
                 <div className="relay-actions-row">
                   <button
@@ -686,21 +787,21 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                     className={`relay-mode-btn ${bulbMode === 'auto' ? 'active-auto' : ''}`}
                     onClick={() => onUpdateSetting?.('bulb_mode', 'auto')}
                   >
-                    Auto (6PM-6AM)
+                    Auto
                   </button>
                   <button
                     type="button"
                     className={`relay-mode-btn ${bulbMode === 'on' ? 'active-on' : ''}`}
                     onClick={() => onUpdateSetting?.('bulb_mode', 'on')}
                   >
-                    Force ON
+                    Always on
                   </button>
                   <button
                     type="button"
                     className={`relay-mode-btn ${bulbMode === 'off' ? 'active-off' : ''}`}
                     onClick={() => onUpdateSetting?.('bulb_mode', 'off')}
                   >
-                    Force OFF
+                    Always off
                   </button>
                 </div>
               </div>
@@ -717,18 +818,24 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               </div>
               <div className="relay-info-col">
                 <div className="relay-title-row">
-                  <h4 className="relay-title">Water Solenoid Relay (RELAY 2)</h4>
+                  <h4 className="relay-title">Water sprinkler</h4>
                   <span className={`relay-status-pill ${isSolenoidActive ? 'on-water' : 'off'}`}>
                     <Power style={{ width: 12, height: 12 }} />
-                    {isSolenoidActive ? 'OPEN / SPRAYING' : 'CLOSED / IDLE'}
+                    {isSolenoidActive ? 'Spraying' : 'Closed'}
                   </span>
                 </div>
                 <p className="relay-description">
-                  {solenoidMode === 'auto'
-                    ? `Auto Mode: Triggers at ≥${solenoidTriggerTemp}°C (Current peak: ${currentMaxTemp !== null ? `${currentMaxTemp.toFixed(1)}°C` : 'N/A'})`
+                  {coolingPhase === 'spraying'
+                    ? `Heat protection is spraying: ${fmtLeft} left in cycle ${piRelay?.cycle}, peak ${piRelay?.temp ?? '--'}°C.`
+                    : coolingPhase === 'waiting'
+                    ? `Heat protection paused after cycle ${piRelay?.cycle}. Re-checking the temperature in ${fmtLeft}.`
                     : solenoidMode === 'on'
-                    ? 'Manual Override: Forced permanently OPEN'
-                    : 'Manual Override: Forced permanently CLOSED'}
+                    ? 'Always open'
+                    : solenoidMode === 'off'
+                    ? `Always closed, but heat protection still opens it at ≥ ${solenoidTriggerTemp}°C. Now ${currentMaxTemp !== null ? `${currentMaxTemp.toFixed(1)}°C` : 'no reading'}.`
+                    : `Auto: sprays 10 min, checks for 2 min, repeats while ≥ ${solenoidTriggerTemp}°C. Now ${currentMaxTemp !== null ? `${currentMaxTemp.toFixed(1)}°C` : 'no reading'}.`}
+                  <br />
+                  <small style={{ opacity: 0.7 }}>{relayLive ? '● Live from the Pi' : '○ Pi not reporting, estimated'}</small>
                 </p>
                 <div className="relay-actions-row">
                   <button
@@ -736,21 +843,21 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                     className={`relay-mode-btn ${solenoidMode === 'auto' ? 'active-auto' : ''}`}
                     onClick={() => onUpdateSetting?.('solenoid_mode', 'auto')}
                   >
-                    Auto (≥38°C)
+                    Auto
                   </button>
                   <button
                     type="button"
                     className={`relay-mode-btn ${solenoidMode === 'on' ? 'active-on' : ''}`}
                     onClick={() => onUpdateSetting?.('solenoid_mode', 'on')}
                   >
-                    Force OPEN
+                    Always open
                   </button>
                   <button
                     type="button"
                     className={`relay-mode-btn ${solenoidMode === 'off' ? 'active-off' : ''}`}
                     onClick={() => onUpdateSetting?.('solenoid_mode', 'off')}
                   >
-                    Force CLOSED
+                    Always closed
                   </button>
                 </div>
               </div>
@@ -758,27 +865,41 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           </div>
         </div>
       </div>
+        </>
+      )}
 
-      {/* Main Grid: Chart + Camera */}
-      <div className="dashboard-grid-main">
+      {/* Overview: chart + recent events.  Camera page: camera. */}
+      {section !== 'controls' && (
+      <div className={`dashboard-grid-main ${section === 'camera' ? 'single' : ''}`}>
+        {section === 'overview' && (
+          <>
         {/* Temperature Chart */}
         <div className="dashboard-panel">
           <div className="panel-header">
             <div>
-              <h3 className="panel-title">Temperature Trend</h3>
+              <h3 className="panel-title">Temperature</h3>
               <p className="panel-subtitle">Last {chartLogs.length} readings</p>
             </div>
             <div className="chart-legend">
               <span className="legend-item">
-                <span className="legend-dot" style={{ background: '#db2777' }}></span> Ambient
+                <span className="legend-dot" style={{ background: '#2f5d50' }}></span> Ambient
               </span>
               <span className="legend-item">
-                <span className="legend-dot" style={{ background: '#f59e0b' }}></span> Floor
+                <span className="legend-dot" style={{ background: '#c08a2e' }}></span> Floor
               </span>
             </div>
           </div>
 
-          <div className="chart-container" onMouseLeave={() => setActiveChartPoint(null)}>
+          {chartLogs.length < 2 && (
+            <div className="chart-empty">
+              {chartLogs.length === 0 ? 'No readings yet. The chart fills in as the Pi sends sensor logs.' : 'Waiting for one more reading to draw the trend…'}
+            </div>
+          )}
+          <div
+            className="chart-container"
+            style={chartLogs.length < 2 ? { display: 'none' } : undefined}
+            onMouseLeave={() => setActiveChartPoint(null)}
+          >
             <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} className="telemetry-svg">
               {/* Y-axis labels */}
               {yLabels.map((label, i) => {
@@ -795,12 +916,12 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
               {/* Threshold line */}
               <line
-                x1={padding} y1={getY(highTempThreshold)}
-                x2={svgWidth - padding} y2={getY(highTempThreshold)}
+                x1={padding} y1={getY(solenoidTriggerTemp)}
+                x2={svgWidth - padding} y2={getY(solenoidTriggerTemp)}
                 stroke="#fda4af" strokeDasharray="6 4" strokeWidth="1"
               />
-              <text x={svgWidth - padding} y={getY(highTempThreshold) - 6} fill="#fb7185" fontSize="9" textAnchor="end" fontWeight="600">
-                {highTempThreshold}° limit
+              <text x={padding + 4} y={getY(solenoidTriggerTemp) - 6} fill="#fb7185" fontSize="9" textAnchor="start" fontWeight="600">
+                {solenoidTriggerTemp}° heat protection
               </text>
 
               {/* Area fills */}
@@ -810,18 +931,18 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               {/* Gradients */}
               <defs>
                 <linearGradient id="ambientGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#db2777" stopOpacity="0.12" />
-                  <stop offset="100%" stopColor="#db2777" stopOpacity="0.01" />
+                  <stop offset="0%" stopColor="#2f5d50" stopOpacity="0.06" />
+                  <stop offset="100%" stopColor="#2f5d50" stopOpacity="0.01" />
                 </linearGradient>
                 <linearGradient id="floorGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#f59e0b" stopOpacity="0.08" />
-                  <stop offset="100%" stopColor="#f59e0b" stopOpacity="0.01" />
+                  <stop offset="0%" stopColor="#c08a2e" stopOpacity="0.08" />
+                  <stop offset="100%" stopColor="#c08a2e" stopOpacity="0.01" />
                 </linearGradient>
               </defs>
 
               {/* Lines */}
-              <path d={buildPath(floorPts)} fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-              <path d={buildPath(ambientPts)} fill="none" stroke="#db2777" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+              <path d={buildPath(floorPts)} fill="none" stroke="#c08a2e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              <path d={buildPath(ambientPts)} fill="none" stroke="#2f5d50" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
 
               {/* Data points */}
               {chartLogs.map((log, index) => {
@@ -835,10 +956,10 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                 return (
                   <g key={log.id} className="chart-point-group" onMouseEnter={() => setActiveChartPoint(log)}>
                     {cyAmbient !== null && (
-                      <circle cx={cx} cy={cyAmbient} r={isSelected ? 5 : 3} fill="#db2777" stroke="#fff" strokeWidth="2" />
+                      <circle cx={cx} cy={cyAmbient} r={isSelected ? 5 : 3} fill="#2f5d50" stroke="#fff" strokeWidth="2" />
                     )}
                     {cyFloor !== null && (
-                      <circle cx={cx} cy={cyFloor} r={isSelected ? 4 : 2.5} fill="#f59e0b" stroke="#fff" strokeWidth="2" />
+                      <circle cx={cx} cy={cyFloor} r={isSelected ? 4 : 2.5} fill="#c08a2e" stroke="#fff" strokeWidth="2" />
                     )}
                     {/* Invisible hover target */}
                     <rect x={cx - 15} y={padding} width={30} height={svgHeight - padding * 2} fill="transparent" />
@@ -851,9 +972,9 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               <div className="chart-tooltip">
                 <span className="tooltip-time">{new Date(activeChartPoint.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                 <div className="tooltip-row">
-                  <span style={{ color: '#db2777', fontWeight: 600 }}>{formatTemp(activeChartPoint.ambient_temp)}°C</span>
-                  <span style={{ color: '#f59e0b', fontWeight: 600 }}>{formatTemp(activeChartPoint.floor_temp)}°C</span>
-                  <span style={{ color: '#64748b' }}>{cleanAudioLevel(activeChartPoint.audio_level)} dB</span>
+                  <span style={{ color: '#2f5d50', fontWeight: 600 }}>{formatTemp(activeChartPoint.ambient_temp)}°C</span>
+                  <span style={{ color: '#c08a2e', fontWeight: 600 }}>{formatTemp(activeChartPoint.floor_temp)}°C</span>
+                  <span style={{ color: '#64748b' }}>{fmtDb(cleanAudioLevel(activeChartPoint.audio_level))} dB</span>
                 </div>
               </div>
             )}
@@ -862,14 +983,18 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           {/* Audio bars */}
           <div className="audio-timeline-section">
             <div className="audio-timeline-header">
-              <span className="audio-timeline-label">Audio Timeline</span>
+              <span className="audio-timeline-label">Noise</span>
               <span className="audio-timeline-avg">
-                Avg: {Math.round(chartLogs.reduce((acc, l) => acc + cleanAudioLevel(l.audio_level), 0) / (chartLogs.length || 1))} dB
+                Avg: {(() => {
+                  const v = chartLogs.map((l) => cleanAudioLevel(l.audio_level)).filter((x): x is number => x !== null);
+                  return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : '--';
+                })()} dB
               </span>
             </div>
+            {chartLogs.length === 0 && <div className="audio-bars-empty">No noise readings yet</div>}
             <div className="audio-bars-grid">
               {chartLogs.map((log) => {
-                const audioLvl = cleanAudioLevel(log.audio_level);
+                const audioLvl = cleanAudioLevel(log.audio_level) ?? 0;
                 const isHigh = audioLvl > noiseThreshold;
                 return (
                   <div
@@ -888,13 +1013,57 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           </div>
         </div>
 
+        {/* Recent events */}
+        <div className="dashboard-panel events-panel">
+          <div className="panel-header">
+            <div>
+              <h3 className="panel-title">Recent events</h3>
+              <p className="panel-subtitle">Alerts and SMS from the Pi</p>
+            </div>
+          </div>
+          {(() => {
+            const items = [
+              ...audioDetections
+                .filter((d) => d.status === 'ATTENTION NEEDED')
+                .map((d) => ({
+                  t: d.created_at,
+                  tone: 'warn',
+                  text: `${d.cough_events} cough, ${d.stress_events} stress sounds (${d.top_class ?? 'audio'})`,
+                })),
+              ...smsLogs.map((l) => ({
+                t: l.created_at,
+                tone: l.status === 'failed' ? 'alert' : 'info',
+                text: `SMS ${l.status === 'failed' ? 'failed' : 'sent'}: ${SMS_TYPE_LABEL[l.alert_type ?? ''] ?? l.alert_type}`,
+              })),
+            ]
+              .sort((x, y) => new Date(y.t).getTime() - new Date(x.t).getTime())
+              .slice(0, 8);
+            if (!items.length) return <p className="events-empty">Nothing to report. Alerts and SMS will show up here.</p>;
+            return (
+              <ul className="events-list">
+                {items.map((it, i) => (
+                  <li key={i} className={`event-row tone-${it.tone}`}>
+                    <span className="event-time">
+                      {new Date(it.t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                    </span>
+                    <span className="event-text">{it.text}</span>
+                  </li>
+                ))}
+              </ul>
+            );
+          })()}
+        </div>
+          </>
+        )}
+
         {/* Camera + Audio */}
+        {section === 'camera' && (
         <div className="dashboard-panel">
           <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
             <div>
-              <h3 className="panel-title">Live Camera Feed</h3>
+              <h3 className="panel-title">Pen camera</h3>
               <p className="panel-subtitle">
-                {feedMode === 'webcam' ? 'PC Live Webcam Feed' : feedMode === 'video' ? 'Uploaded Video Clip' : 'Latest pen snapshot / stream'}
+                {feedMode === 'webcam' ? 'Webcam on this computer' : feedMode === 'video' ? 'Uploaded video' : 'Latest frame from the Pi'}
               </p>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -959,13 +1128,18 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               <img
                 ref={cameraImageRef}
                 src={cameraFeedUrl}
-                onError={() => {
-                  const fallback = latestLog.image_url || 'https://images.unsplash.com/photo-1516467508483-a7212febe31a?auto=format&fit=crop&w=1000&q=80';
-                  if (cameraFeedUrl !== fallback) {
-                    setCameraFeedUrl(fallback);
+                onError={(e) => {
+                  // only fall back to a real snapshot from the Pi, never a stock photo
+                  if (latestLog.image_url && cameraFeedUrl !== latestLog.image_url) {
+                    setCameraFeedUrl(latestLog.image_url);
+                  } else {
+                    e.currentTarget.dataset.broken = 'true';
                   }
                 }}
-                alt="Pig Pen Live Snapshot"
+                onLoad={(e) => {
+                  e.currentTarget.dataset.broken = 'false';
+                }}
+                alt=""
                 className="snapshot-image"
                 crossOrigin="anonymous"
               />
@@ -1023,12 +1197,12 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           {/* Quick stats under camera */}
           <div className="camera-stats">
             <div className="camera-stat">
-              <Thermometer style={{ width: 14, height: 14, color: '#db2777' }} />
+              <Thermometer style={{ width: 14, height: 14, color: '#2f5d50' }} />
               <span>{formatTemp(ambientTempNum)}°C</span>
             </div>
             <div className="camera-stat">
               <Volume2 style={{ width: 14, height: 14, color: '#6366f1' }} />
-              <span>{latestAudio} dB</span>
+              <span>{fmtDb(latestAudio)} dB</span>
             </div>
             <div className="camera-stat">
               <Activity style={{ width: 14, height: 14, color: movingPigs.length > 0 ? '#059669' : '#94a3b8' }} />
@@ -1042,7 +1216,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               <div className="indicator-badge-group">
                 <span className={`live-activity-pill ${movingPigs.length > 0 ? 'moving' : 'resting'}`}>
                   <span className={`beacon-dot ${movingPigs.length > 0 ? 'pulse-green' : 'still-blue'}`}></span>
-                  {movingPigs.length > 0 ? 'Pigs Moving (Active)' : 'Pigs Resting (Still)'}
+                  {pigDetections.length === 0 ? 'No pigs detected' : movingPigs.length > 0 ? 'Pigs moving' : 'Pigs resting'}
                 </span>
               </div>
               <div className="indicator-counts-group">
@@ -1057,7 +1231,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
             <div className="mobility-progress-row">
               <div className="mobility-label-row">
-                <span className="mobility-label">Herd Mobility Rate</span>
+                <span className="mobility-label">Moving now</span>
                 <span className="mobility-percentage">{herdActivityRate}% Active</span>
               </div>
               <div className="mobility-track">
@@ -1074,7 +1248,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <div className="audio-info">
               <Volume2 style={{ width: 18, height: 18, color: '#6366f1' }} />
               <div>
-                <h4 className="audio-title">Audio Clip</h4>
+                <h4 className="audio-title">Latest sound clip</h4>
                 <p className="audio-subtitle">
                   {latestLog.audio_url ? 'Sound snippet available' : 'No audio attached'}
                 </p>
@@ -1110,11 +1284,13 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
           {/* Nav footer */}
           <button className="view-all-logs-btn" onClick={onNavigateLogs}>
-            View All Logs ({logs.length})
+            View all logs ({logs.length})
             <ArrowRight style={{ width: 14, height: 14 }} />
           </button>
         </div>
+        )}
       </div>
+      )}
     </div>
   );
 };

@@ -5,6 +5,8 @@
 // If you change a number here, change it in pi/app.py too.
 // =====================================================================
 import * as ort from 'onnxruntime-web';
+import type { SystemSetting } from '../types';
+import { settingNumber } from './settingsSpec';
 
 export const SAMPLE_RATE = 16000;
 const N_FFT = 1024;
@@ -87,25 +89,16 @@ export interface AnalysisResult {
 }
 
 // ---------------------------------------------------------------------
-// Settings from Supabase system_settings (same parsing as the Pi)
+// Settings from Supabase system_settings (shared spec = same values the Pi uses)
 // ---------------------------------------------------------------------
-export function coughSettingsFrom(rows: { setting_key: string; setting_value: string }[]): CoughSettings {
-  const s = { ...DEFAULT_COUGH_SETTINGS };
-  for (const r of rows) {
-    const v = parseFloat(String(r.setting_value ?? '').trim());
-    if (Number.isNaN(v)) continue;
-    if (r.setting_key === 'audio_threshold') {
-      const t = v > 1 ? v / 100 : v;
-      if (t >= 0.3 && t <= 0.95) s.threshold = t;
-    } else if (r.setting_key === 'audio_min_db' && v >= 30 && v <= 90) {
-      s.minDb = v;
-    } else if (r.setting_key === 'cough_alert_min' && Math.trunc(v) >= 1 && Math.trunc(v) <= 10) {
-      s.alertMin = Math.trunc(v);
-    } else if (r.setting_key === 'audio_ref_db' && v >= -30 && v <= -6) {
-      s.refDb = v;
-    }
-  }
-  return s;
+export function coughSettingsFrom(rows: SystemSetting[]): CoughSettings {
+  return {
+    threshold: settingNumber(rows, 'audio_threshold'),
+    minDb: settingNumber(rows, 'audio_min_db'),
+    alertMin: settingNumber(rows, 'cough_alert_min'),
+    refDb: settingNumber(rows, 'audio_ref_db'),
+    useGate: true,
+  };
 }
 
 // ---------------------------------------------------------------------

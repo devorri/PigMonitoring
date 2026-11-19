@@ -1,14 +1,36 @@
 import React from 'react';
 import pigLogo from '../assets/pig-logo.png';
-import { LayoutDashboard, Database, PhoneCall, Settings, DatabaseZap, AudioWaveform } from 'lucide-react';
+import {
+  LayoutDashboard,
+  ToggleRight,
+  Camera,
+  AudioWaveform,
+  Database,
+  PhoneCall,
+  Settings,
+  DatabaseZap,
+} from 'lucide-react';
+
+export type AppTab = 'overview' | 'controls' | 'camera' | 'sound' | 'logs' | 'contacts' | 'settings';
 
 interface NavbarProps {
-  activeTab: 'overview' | 'logs' | 'contacts' | 'tester' | 'settings';
-  setActiveTab: (tab: 'overview' | 'logs' | 'contacts' | 'tester' | 'settings') => void;
+  activeTab: AppTab;
+  setActiveTab: (tab: AppTab) => void;
   isMock: boolean;
   onOpenConfig: () => void;
   activeContactsCount: number;
+  piOnline: boolean;
 }
+
+const NAV: { id: AppTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'controls', label: 'Controls', icon: ToggleRight },
+  { id: 'camera', label: 'Camera', icon: Camera },
+  { id: 'sound', label: 'Sound', icon: AudioWaveform },
+  { id: 'logs', label: 'Sensor logs', icon: Database },
+  { id: 'contacts', label: 'Contacts & SMS', icon: PhoneCall },
+  { id: 'settings', label: 'Settings', icon: Settings },
+];
 
 export const Navbar: React.FC<NavbarProps> = ({
   activeTab,
@@ -16,81 +38,44 @@ export const Navbar: React.FC<NavbarProps> = ({
   isMock,
   onOpenConfig,
   activeContactsCount,
+  piOnline,
 }) => {
   return (
-    <header className="navbar-container">
-      <div className="navbar-content">
-        {/* Brand & Logo */}
-        <div className="brand-section">
-          <div className="logo-wrapper">
-            <div className="logo-shield">
-              <img src={pigLogo} alt="Pig Monitoring System Logo" className="brand-logo" />
-            </div>
-            <div className="logo-glow"></div>
-          </div>
-          <div className="brand-titles">
-            <div className="brand-badge">
-              <span className="live-pulse"></span>
-              PIG MONITORING SYSTEM
-            </div>
-            <h1 className="brand-name">
-              Pig Monitoring <span className="gradient-text">System</span>
-            </h1>
-          </div>
-        </div>
-
-        {/* Navigation Tabs */}
-        <nav className="nav-tabs">
-          <button
-            className={`nav-tab ${activeTab === 'overview' ? 'active' : ''}`}
-            onClick={() => setActiveTab('overview')}
-          >
-            <LayoutDashboard className="tab-icon" />
-            <span>Dashboard</span>
-          </button>
-          <button
-            className={`nav-tab ${activeTab === 'logs' ? 'active' : ''}`}
-            onClick={() => setActiveTab('logs')}
-          >
-            <Database className="tab-icon" />
-            <span>Sensor Logs</span>
-          </button>
-          <button
-            className={`nav-tab ${activeTab === 'contacts' ? 'active' : ''}`}
-            onClick={() => setActiveTab('contacts')}
-          >
-            <PhoneCall className="tab-icon" />
-            <span>Contacts</span>
-            <span className="tab-badge">{activeContactsCount}</span>
-          </button>
-          <button
-            className={`nav-tab ${activeTab === 'tester' ? 'active' : ''}`}
-            onClick={() => setActiveTab('tester')}
-          >
-            <AudioWaveform className="tab-icon" />
-            <span>Cough Tester</span>
-          </button>
-          <button
-            className={`nav-tab ${activeTab === 'settings' ? 'active' : ''}`}
-            onClick={() => setActiveTab('settings')}
-          >
-            <Settings className="tab-icon" />
-            <span>Settings</span>
-          </button>
-        </nav>
-
-        {/* Right Utility Actions */}
-        <div className="nav-actions">
-          <button
-            className={`db-status-btn ${isMock ? 'mock-mode' : 'connected-mode'}`}
-            onClick={onOpenConfig}
-            title="Manage Supabase connection credentials"
-          >
-            <DatabaseZap className="status-icon" />
-            <span className="status-label">{isMock ? 'Demo Mode' : 'Supabase Live'}</span>
-          </button>
+    <aside className="sidebar">
+      <div className="sidebar-brand">
+        <img src={pigLogo} alt="" className="sidebar-logo" />
+        <div>
+          <div className="sidebar-name">Pig Monitor</div>
+          <div className="sidebar-sub">Pen 1 · Raspberry Pi</div>
         </div>
       </div>
-    </header>
+
+      <nav className="sidebar-nav" aria-label="Main">
+        {NAV.map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            type="button"
+            className={`sidebar-link ${activeTab === id ? 'active' : ''}`}
+            aria-current={activeTab === id ? 'page' : undefined}
+            onClick={() => setActiveTab(id)}
+          >
+            <Icon className="sidebar-icon" />
+            <span>{label}</span>
+            {id === 'contacts' && activeContactsCount > 0 && <span className="sidebar-count">{activeContactsCount}</span>}
+          </button>
+        ))}
+      </nav>
+
+      <div className="sidebar-foot">
+        <div className={`sidebar-status ${piOnline ? 'ok' : 'off'}`}>
+          <span className="sidebar-dot" />
+          {piOnline ? 'Pi online' : 'Pi offline'}
+        </div>
+        <button type="button" className="sidebar-db" onClick={onOpenConfig} title="Database connection">
+          <DatabaseZap className="sidebar-icon" />
+          {isMock ? 'Demo data' : 'Database connected'}
+        </button>
+      </div>
+    </aside>
   );
 };

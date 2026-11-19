@@ -34,10 +34,18 @@
  Settings read from system_settings (change them on the website):
    bulb_mode on/off/auto   bulb_start_hour / bulb_end_hour
    solenoid_mode on/off/auto   solenoid_trigger_temp
+     (heat protection: in off/auto, >= trigger -> water 10 min ON / 2 min wait, repeat until cool)
    sync_interval_seconds   audio_interval_seconds
    cam_live_enabled   cam_live_interval_seconds   cam_flash off/on/night
    audio_threshold 0.30-0.95 (default 0.60)   audio_min_db 30-90 (default 50)
    cough_alert_min 1-10 (default 2)   audio_ref_db -30..-6 (default -18)
+   sms_enabled  sms_interval_minutes  sms_on_heat  sms_on_no_motion  sms_no_motion_minutes
+   sms_motion_start_hour / sms_motion_end_hour  sms_on_audio  sms_send_recovery  sms_test_request
+
+ SMS (Semaphore): put the API key ONLY on the Pi, in /home/vid/vid/.env (never in Supabase):
+        SEMAPHORE_API_KEY=your_key
+        SEMAPHORE_SENDER=YourSenderName      (optional, else your default Sender Name)
+   Recipients = active rows in the contacts table. Every SMS is logged in sms_logs.
 
  Test an audio file with the exact same cough logic (no mic / Supabase needed):
         python app.py --test-audio some_clip.wav
@@ -88,7 +96,14 @@ DEFAULT_SUPABASE_KEY = (
 # Relays (BCM GPIO numbers, active-LOW module)
 RELAY_BULB_GPIO = 17       # physical pin 11
 RELAY_SOLENOID_GPIO = 27   # physical pin 13
-SOLENOID_HYSTERESIS = 1.0  # solenoid closes again below trigger - 1.0 C
+SOLENOID_HYSTERESIS = 1.0  # heat is "over" below trigger - 1.0 C
+# Heat protection: works in EVERY mode (even solenoid_mode=off, even without internet)
+COOL_SPRAY_S = 10 * 60     # solenoid ON for 10 min
+COOL_WAIT_S = 2 * 60       # then OFF 2 min so the sensor reads dry air/floor, then check again
+COOL_WARN_CYCLES = 4       # still hot after this many cycles -> warning every cycle (keeps cooling)
+COOL_SENSOR_LOST_S = 30    # no temperature for 30s -> close the solenoid (fail-safe)
+TEMP_VALID = (-10.0, 85.0) # readings outside this = sensor glitch, ignored
+DEFAULT_TRIGGER_C = 38.0   # used when Supabase settings never loaded
 
 # MLX90614
 MLX_BUS = 1
@@ -170,6 +185,23 @@ stop_event = threading.Event()
 # ========================================================
 # --- SUPABASE ---
 # ========================================================
+def read_env(name, default=""):
+    """Environment variable, else KEY=value from .env next to app.py (or one folder up)."""
+    v = os.getenv(name)
+    if v:
+        return v.strip()
+    for env_file in (BASE_DIR / ".env", BASE_DIR.parent / ".env"):
+        if not env_file.exists():
+            continue
+        for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, val = line.split("=", 1)
+                if k.strip() == name:
+                    return val.strip().strip('"').strip("'")
+    return default
+
+
 def load_supabase_config():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
@@ -230,11 +262,13 @@ class Supabase:
             f"{self.url}/rest/v1/system_settings",
             params={"setting_key": f"eq.{key}"},
             json={"setting_value": value},
-            headers={"Prefer": "return=minimal"},
+            headers={"Prefer": "return=representation"},
             timeout=10,
         )
         if r.status_code not in (200, 204):
             raise requests.RequestException(f"setting {key}: HTTP {r.status_code} {r.text[:200]}")
+        if r.status_code == 200 and r.text.strip() in ("", "[]"):
+            self.insert("system_settings", {"setting_key": key, "setting_value": value})   # row was missing
 
     def upload(self, bucket, path, data, content_type):
         r = self.s.post(
@@ -257,75 +291,87 @@ class Supabase:
 # ========================================================
 # --- SETTINGS (all from Supabase) ---
 # ========================================================
+# key -> (attribute, kind, default, min/options, max)
+# SAME keys / defaults / limits as the website (src/lib/settingsSpec.ts) and supabase_pi_setup.sql.
+# A missing or invalid value -> the default (exactly what the website shows).
+SETTINGS_SPEC = {
+    # relays
+    "bulb_mode":                 ("bulb_mode", "enum", "off", ("auto", "on", "off"), None),
+    "bulb_start_hour":           ("bulb_start_hour", "int", 18, 0, 23),
+    "bulb_end_hour":             ("bulb_end_hour", "int", 6, 0, 23),
+    "solenoid_mode":             ("solenoid_mode", "enum", "off", ("auto", "on", "off"), None),
+    "solenoid_trigger_temp":     ("solenoid_trigger_temp", "float", 38.0, 25.0, 45.0),
+    # camera
+    "cam_live_enabled":          ("live_enabled", "bool", True, None, None),
+    "cam_live_interval_seconds": ("live_interval", "int", DEFAULT_LIVE_INTERVAL, MIN_LIVE_INTERVAL, 60),
+    "cam_flash":                 ("flash", "enum", "off", ("off", "on", "night"), None),
+    # audio AI
+    "audio_threshold":           ("audio_threshold", "float", AUDIO_THRESHOLD, 0.30, 0.95),
+    "audio_min_db":              ("audio_min_db", "float", AUDIO_MIN_DB, 30.0, 90.0),
+    "cough_alert_min":           ("cough_alert_min", "int", COUGH_ALERT_MIN, 1, 10),
+    "audio_ref_db":              ("audio_ref_db", "float", AUDIO_REF_DBFS, -30.0, -6.0),
+    # timing
+    "sync_interval_seconds":     ("sync_interval", "int", 15, 5, 3600),
+    "audio_interval_seconds":    ("audio_interval", "int", 60, 10, 3600),
+    # SMS alerts
+    "sms_enabled":               ("sms_enabled", "bool", False, None, None),
+    "sms_interval_minutes":      ("sms_interval_minutes", "int", 10, 1, 1440),
+    "sms_on_heat":               ("sms_on_heat", "bool", True, None, None),
+    "sms_on_no_motion":          ("sms_on_no_motion", "bool", True, None, None),
+    "sms_no_motion_minutes":     ("sms_no_motion_minutes", "int", 120, 10, 1440),
+    "sms_motion_start_hour":     ("sms_motion_start_hour", "int", 6, 0, 23),
+    "sms_motion_end_hour":       ("sms_motion_end_hour", "int", 18, 0, 23),
+    "sms_on_audio":              ("sms_on_audio", "bool", True, None, None),
+    "sms_send_recovery":         ("sms_send_recovery", "bool", True, None, None),
+}
+
+
+def parse_setting(key, raw):
+    """Returns the cleaned value, or None if invalid (same rules as validateSetting() on the website)."""
+    _, kind, _, lo, hi = SETTINGS_SPEC[key]
+    v = str(raw if raw is not None else "").strip().lower()
+    if kind == "enum":
+        return v if v in lo else None
+    if kind == "bool":
+        if v in ("true", "1", "on", "yes"):
+            return True
+        if v in ("false", "0", "off", "no"):
+            return False
+        return None
+    try:
+        n = float(v)
+    except ValueError:
+        return None
+    if key == "audio_threshold" and n > 1:      # "60" -> 0.6
+        n /= 100.0
+    if not lo <= n <= hi:
+        return None
+    if kind == "int":
+        return int(n) if n == int(n) else None
+    return n
+
+
 class Settings:
     def __init__(self):
-        self.loaded = False            # relays stay OFF until settings arrive
-        # relays
-        self.bulb_mode = "off"
-        self.solenoid_mode = "off"
-        self.bulb_start_hour = 18
-        self.bulb_end_hour = 6
-        self.solenoid_trigger_temp = 38.0
-        # timing
-        self.sync_interval = 15
-        self.audio_interval = 60
-        # camera
-        self.live_enabled = True
-        self.live_interval = DEFAULT_LIVE_INTERVAL
-        self.flash = "off"
-        # audio AI
-        self.audio_threshold = AUDIO_THRESHOLD   # 0.30 - 0.95, higher = fewer alerts
-        self.audio_min_db = AUDIO_MIN_DB         # seconds quieter than this are skipped
-        self.cough_alert_min = COUGH_ALERT_MIN   # coughs per audio_interval before ATTENTION
-        self.audio_ref_db = AUDIO_REF_DBFS       # loudness every window is leveled to
+        self.loaded = False            # True once the first settings fetch worked
+        for key, (attr, _, default, _, _) in SETTINGS_SPEC.items():
+            setattr(self, attr, default)
 
     def apply(self, rows):
-        for row in rows:
-            key = row.get("setting_key")
-            val = str(row.get("setting_value") or "").strip().lower()
-            try:
-                if key == "bulb_mode":
-                    self.bulb_mode = val
-                elif key == "solenoid_mode":
-                    self.solenoid_mode = val
-                elif key == "bulb_start_hour":
-                    self.bulb_start_hour = int(float(val))
-                elif key == "bulb_end_hour":
-                    self.bulb_end_hour = int(float(val))
-                elif key == "solenoid_trigger_temp":
-                    self.solenoid_trigger_temp = float(val)
-                elif key == "sync_interval_seconds" and int(float(val)) > 0:
-                    self.sync_interval = int(float(val))
-                elif key == "audio_interval_seconds" and int(float(val)) >= 10:
-                    self.audio_interval = int(float(val))
-                elif key == "cam_live_enabled":
-                    self.live_enabled = val in ("true", "1", "on", "yes")
-                elif key == "cam_live_interval_seconds":
-                    sec = int(float(val))
-                    if 1 <= sec <= 60:
-                        self.live_interval = max(MIN_LIVE_INTERVAL, sec)
-                elif key == "audio_threshold":
-                    v = float(val)
-                    if v > 1:                    # allow "60" as well as "0.6"
-                        v /= 100.0
-                    if 0.3 <= v <= 0.95:
-                        self.audio_threshold = v
-                elif key == "audio_min_db":
-                    v = float(val)
-                    if 30 <= v <= 90:
-                        self.audio_min_db = v
-                elif key == "cough_alert_min":
-                    v = int(float(val))
-                    if 1 <= v <= 10:
-                        self.cough_alert_min = v
-                elif key == "audio_ref_db":
-                    v = float(val)
-                    if -30 <= v <= -6:
-                        self.audio_ref_db = v
-                elif key == "cam_flash" and val in ("off", "on", "night"):
-                    self.flash = val
-            except ValueError:
-                pass
+        values = {r.get("setting_key"): r.get("setting_value") for r in rows}
+        bad = []
+        for key, (attr, _, default, _, _) in SETTINGS_SPEC.items():
+            if key not in values:
+                setattr(self, attr, default)
+                continue
+            v = parse_setting(key, values[key])
+            if v is None:
+                bad.append(f"{key}={values[key]!r}")
+                v = default
+            setattr(self, attr, v)
+        if bad and bad != getattr(self, "_last_bad", None):
+            log.warning("Invalid settings -> using defaults for: %s", ", ".join(bad))
+        self._last_bad = bad
         if not self.loaded:
             self.loaded = True
             log.info("Settings loaded from Supabase: bulb=%s solenoid=%s (trigger %.1fC)",
@@ -427,41 +473,342 @@ class Relays:
             self.bulb_on = self.solenoid_on = False
 
 
+# ========================================================
+# --- SMS ALERTS (Semaphore) ---
+# ========================================================
+SEMAPHORE_URL = "https://api.semaphore.co/api/v4/messages"
+SMS_CAMERA_FRESH_S = 60        # camera frame older than this -> "not moving" check paused
+
+
+def normalize_ph_number(raw):
+    """'+63 912 345 6789' / '0912-345-6789' / '9123456789' -> '09123456789' (None if not a PH mobile)."""
+    d = re.sub(r"\D", "", str(raw or ""))
+    if d.startswith("63") and len(d) == 12:
+        d = "0" + d[2:]
+    elif d.startswith("9") and len(d) == 10:
+        d = "0" + d
+    return d if d.startswith("09") and len(d) == 11 else None
+
+
+class SmsWorker(threading.Thread):
+    """Sends queued SMS in the background (slow internet never delays the relays) + logs to sms_logs."""
+
+    def __init__(self, sb_url, sb_key):
+        super().__init__(name="sms", daemon=True)
+        self.sb = Supabase(sb_url, sb_key)
+        self.http = requests.Session()
+        self.queue = queue.Queue(maxsize=50)
+        self.api_key = read_env("SEMAPHORE_API_KEY")
+        self.sender = read_env("SEMAPHORE_SENDER")
+        self.sent = self.failed = 0
+        self.last = "none"
+        if not self.api_key:
+            log.warning("[SMS] No SEMAPHORE_API_KEY in .env -> SMS alerts can't be sent")
+
+    def send(self, kind, message):
+        try:
+            self.queue.put_nowait((kind, message))
+        except queue.Full:
+            log.warning("[SMS] queue full, dropped: %s", message)
+
+    def status_text(self):
+        return f"sms={'ready' if self.api_key else 'NO_KEY'} sent={self.sent} failed={self.failed} last={self.last}"
+
+    def run(self):
+        while not stop_event.is_set():
+            try:
+                kind, message = self.queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            self._deliver(kind, message)
+
+    def _deliver(self, kind, message):
+        numbers, status, error, response = [], "failed", None, None
+        try:
+            if not self.api_key:
+                raise RuntimeError("no SEMAPHORE_API_KEY on the Pi")
+            rows = self.sb.select("contacts", {"select": "name,phone_number", "is_active": "eq.true"})
+            bad = [r.get("phone_number") for r in rows if not normalize_ph_number(r.get("phone_number"))]
+            numbers = sorted({n for n in (normalize_ph_number(r.get("phone_number")) for r in rows) if n})
+            if bad:
+                log.warning("[SMS] skipped invalid numbers: %s", ", ".join(map(str, bad)))
+            if not numbers:
+                raise RuntimeError("no active contacts with a valid PH mobile number")
+            data = {"apikey": self.api_key, "number": ",".join(numbers), "message": message}
+            if self.sender:
+                data["sendername"] = self.sender
+            r = self.http.post(SEMAPHORE_URL, data=data, timeout=20)
+            response = r.text[:500]
+            if r.status_code != 200:
+                raise RuntimeError(f"Semaphore HTTP {r.status_code}: {r.text[:200]}")
+            body = r.json()
+            items = body if isinstance(body, list) else [body]
+            if not items or not any(isinstance(i, dict) and i.get("message_id") for i in items):
+                raise RuntimeError(f"Semaphore did not accept it: {r.text[:200]}")
+            status = "sent"
+            self.sent += 1
+            log.info("[SMS] %s -> %d contact(s): %s", kind, len(numbers), message)
+        except (requests.RequestException, RuntimeError, ValueError) as e:
+            error = str(e)[:300]
+            self.failed += 1
+            log.warning("[SMS] %s FAILED: %s", kind, error)
+        self.last = f"{kind}:{status}@{datetime.now().strftime('%H:%M')}"
+        live.event("alert" if status == "failed" else "info", f"SMS {kind} {status}" + (f": {error}" if error else ""))
+        try:
+            self.sb.insert("sms_logs", {"alert_type": kind, "message": message, "numbers": ",".join(numbers),
+                                        "status": status, "error": error, "provider_response": response})
+        except requests.RequestException as e:
+            log.warning("[SMS] log upload failed: %s", e)
+
+
+class SmsAlerts:
+    """
+    Decides WHEN to text (runs in the main loop every second, no network here).
+      heat      : hottest of ambient/floor >= solenoid_trigger_temp
+      no_motion : camera sees pigs but none moved for sms_no_motion_minutes,
+                  only between sms_motion_start_hour and sms_motion_end_hour (pigs sleep at night)
+      audio     : the audio AI summary says ATTENTION NEEDED (coughs / stress)
+    While a problem lasts it re-sends every sms_interval_minutes (per alert type).
+    sms_send_recovery -> one "back to normal" SMS when heat / no_motion clears.
+    sms_test_request changed on the website -> test SMS (works even when sms_enabled is off).
+    """
+
+    def __init__(self, worker):
+        self.worker = worker
+        self.last_sent = {}               # kind -> time
+        self.active = {}                  # kind -> True while the problem lasts (for recovery SMS)
+        self.last_motion = time.time()
+        self.test_seen = None
+
+    @staticmethod
+    def _stamp():
+        return datetime.now().strftime("%I:%M%p").lstrip("0").lower()
+
+    def _due(self, kind, now):
+        return now - self.last_sent.get(kind, 0.0) >= settings.sms_interval_minutes * 60
+
+    def _alert(self, kind, now, message):
+        self.active[kind] = True
+        if settings.sms_enabled and self._due(kind, now):
+            self.last_sent[kind] = now
+            self.worker.send(kind, message)
+
+    def _clear(self, kind, message):
+        if self.active.pop(kind, False):
+            self.last_sent.pop(kind, None)
+            if settings.sms_enabled and settings.sms_send_recovery:
+                self.worker.send(kind + "_ok", message)
+
+    def check_test(self, rows_value):
+        if rows_value is None:
+            return
+        if self.test_seen is None:            # first read after start: don't send old requests
+            self.test_seen = rows_value
+            return
+        if rows_value != self.test_seen:
+            self.test_seen = rows_value
+            self.worker.send("test", f"Pig Monitor: SMS alerts are working. You will get alerts here. {self._stamp()}")
+
+    def tick(self, ambient, floor, logic, vision):
+        now = time.time()
+        temps = [t for t in (ambient, floor) if RelayLogic._valid(t)]
+        peak = max(temps) if temps else None
+        trig = logic.trigger()
+
+        # --- heat ---
+        if settings.sms_on_heat and peak is not None and peak >= trig:
+            cooling = "water ON" if logic.phase == "spraying" else "re-checking" if logic.phase == "waiting" else "starting"
+            warn = " NOT COOLING DOWN, check pigs/water!" if logic.cycles > COOL_WARN_CYCLES else ""
+            self._alert("heat", now, f"PIG ALERT: HEAT {peak:.1f}C (limit {trig:.0f}C). "
+                                     f"Cooling {cooling}, cycle {max(1, logic.cycles)}.{warn} {self._stamp()}")
+        elif peak is not None and peak < trig - SOLENOID_HYSTERESIS:
+            self._clear("heat", f"Pig Monitor OK: temperature back to {peak:.1f}C. {self._stamp()}")
+
+        # --- pigs not moving ---
+        cam_ok = bool(vision) and now - vision.last_frame_time < SMS_CAMERA_FRESH_S
+        if cam_ok and vision.moving > 0:
+            self.last_motion = now
+        h = datetime.now().hour
+        a, b = settings.sms_motion_start_hour, settings.sms_motion_end_hour
+        in_window = (a <= h < b) if a < b else (h >= a or h < b)
+        pigs_seen = cam_ok and (vision.pigs + vision.piglets) > 0
+        if not (cam_ok and in_window):
+            self.last_motion = now                 # camera down / night -> restart the count
+        still_min = (now - self.last_motion) / 60
+        if settings.sms_on_no_motion and pigs_seen and still_min >= settings.sms_no_motion_minutes:
+            self._alert("no_motion", now, f"PIG ALERT: pigs have not moved for {still_min:.0f} min "
+                                          f"({vision.pigs + vision.piglets} seen on camera). Please check. {self._stamp()}")
+        elif still_min < 1:
+            self._clear("no_motion", f"Pig Monitor OK: pigs are moving again. {self._stamp()}")
+
+    def on_audio(self, result):
+        if not result or result.get("status") != "ATTENTION NEEDED" or not settings.sms_on_audio:
+            return
+        now = time.time()
+        self._alert("audio", now, f"PIG ALERT: {result.get('cough_events', 0)} cough / "
+                                  f"{result.get('stress_events', 0)} stress sound(s) in the last "
+                                  f"{settings.audio_interval}s ({result.get('top_class')}). {self._stamp()}")
+        self.active.pop("audio", None)             # audio has no "back to normal" SMS
+
+
+class RelayStatePublisher(threading.Thread):
+    """
+    Sends the REAL relay state to system_settings.relay_state (JSON) so the website shows
+    what the relays are actually doing (incl. heat protection). Runs in its own thread:
+    a slow / dead internet never delays the relays.
+    """
+
+    HEARTBEAT_S = 30
+
+    def __init__(self, sb):
+        super().__init__(name="relay-state", daemon=True)
+        self.sb = sb
+        self.cond = threading.Condition()
+        self.latest = None
+        self.key = None
+        self.sent_key = None
+        self.sent_at = 0.0
+
+    def update(self, payload, key):
+        with self.cond:
+            self.latest, self.key = payload, key
+            if key != self.sent_key:
+                self.cond.notify()
+
+    def run(self):
+        while not stop_event.is_set():
+            with self.cond:
+                self.cond.wait(timeout=1.0)
+                payload, key = self.latest, self.key
+            if payload is None:
+                continue
+            if key == self.sent_key and time.time() - self.sent_at < self.HEARTBEAT_S:
+                continue
+            try:
+                self.sb.set_setting("relay_state", json.dumps({**payload, "t": round(time.time(), 1)}))
+                self.sent_key, self.sent_at = key, time.time()
+            except requests.RequestException as e:
+                log.warning("Relay state upload failed: %s", e)
+                stop_event.wait(5)
+
+
 class RelayLogic:
-    """Same rules the main ESP32 used."""
+    """
+    Bulb: on / off / auto (schedule) from Supabase.
+
+    Water solenoid:
+      solenoid_mode = on   -> always open
+      anything else (off / auto) -> HEAT PROTECTION:
+        hottest of ambient/floor >= solenoid_trigger_temp (default 38 C)
+          -> open 10 min -> close, wait 2 min -> still >= trigger - 1 C? open again ...
+          -> cooled down -> back to normal (closed)
+        Works even when settings never loaded (no internet), using 38 C.
+        While cooling, the heating bulb is forced OFF.
+        No valid temperature for 30s -> solenoid closes (fail-safe).
+    """
 
     def __init__(self):
-        self.solenoid_auto_active = False
+        self.phase = "idle"          # idle | spraying | waiting
+        self.phase_until = 0.0
+        self.cycles = 0
+        self.last_temp = None
+        self.last_temp_t = 0.0
+
+    @staticmethod
+    def _valid(t):
+        return t is not None and TEMP_VALID[0] <= t <= TEMP_VALID[1]
+
+    def trigger(self):
+        return settings.solenoid_trigger_temp if settings.loaded else DEFAULT_TRIGGER_C
+
+    def state(self):
+        return {
+            "phase": self.phase,                           # idle | spraying | waiting
+            "left": max(0, int(self.phase_until - time.time())) if self.phase != "idle" else 0,
+            "cycle": self.cycles,
+            "temp": None if self.last_temp is None else round(self.last_temp, 1),
+            "trigger": self.trigger(),
+        }
+
+    def status(self):
+        if self.phase == "idle":
+            return "normal"
+        left = max(0, int(self.phase_until - time.time()))
+        return f"{self.phase} {left // 60}:{left % 60:02d} (cycle {self.cycles})"
+
+    def _set_phase(self, phase, seconds, why):
+        self.phase = phase
+        self.phase_until = time.time() + seconds
+        log.warning("[COOLING] %s", why)
+        live.event("alert" if phase == "spraying" else "info", why)
+
+    def _cooling(self, max_temp):
+        """Runs the 10 min ON / 2 min wait cycle. Returns True while the solenoid must be open."""
+        now = time.time()
+        if self._valid(max_temp):
+            self.last_temp, self.last_temp_t = max_temp, now
+        sensor_lost = now - self.last_temp_t > COOL_SENSOR_LOST_S
+        temp = self.last_temp
+        trig = self.trigger()
+
+        if self.phase == "idle":
+            if not sensor_lost and temp is not None and temp >= trig:
+                self.cycles = 1
+                self._set_phase("spraying", COOL_SPRAY_S,
+                                f"HEAT {temp:.1f}C >= {trig:.1f}C -> water ON for {COOL_SPRAY_S // 60} min (cycle 1)")
+            return self.phase == "spraying"
+
+        if sensor_lost:
+            log.warning("[COOLING] No temperature for %ds -> water OFF (fail-safe)", COOL_SENSOR_LOST_S)
+            live.event("alert", "Temp sensor lost during cooling -> water OFF")
+            self.phase, self.cycles = "idle", 0
+            return False
+
+        if self.phase == "spraying":
+            if now >= self.phase_until:
+                self._set_phase("waiting", COOL_WAIT_S,
+                                f"Cycle {self.cycles} done -> water OFF, waiting {COOL_WAIT_S // 60} min then re-check")
+                return False
+            return True
+
+        # waiting
+        if now < self.phase_until:
+            return False
+        if temp >= trig - SOLENOID_HYSTERESIS:
+            self.cycles += 1
+            msg = f"Still hot {temp:.1f}C -> water ON again (cycle {self.cycles})"
+            if self.cycles > COOL_WARN_CYCLES:
+                msg += " - NOT COOLING DOWN, check the pigs / water supply!"
+            self._set_phase("spraying", COOL_SPRAY_S, msg)
+            return True
+        log.info("[COOLING] Cooled down to %.1fC after %d cycle(s) -> back to normal", temp, self.cycles)
+        live.event("info", f"Cooled down to {temp:.1f}C after {self.cycles} cycle(s)")
+        self.phase, self.cycles = "idle", 0
+        return False
 
     def decide(self, ambient, floor, now):
-        if not settings.loaded:
-            return False, False
+        temps = [t for t in (ambient, floor) if self._valid(t)]
+        max_temp = max(temps) if temps else None
+
+        # --- Water solenoid ---
+        cooling = self._cooling(max_temp)
+        if settings.loaded and settings.solenoid_mode == "on":
+            solenoid = True
+        else:
+            solenoid = cooling                         # off / auto / no settings -> heat protection only
 
         # --- Heating bulb ---
-        if settings.bulb_mode == "on":
+        if not settings.loaded:
+            bulb = False
+        elif settings.bulb_mode == "on":
             bulb = True
         elif settings.bulb_mode == "off":
             bulb = False
         else:   # auto / schedule
             h = now.hour
             bulb = h >= settings.bulb_start_hour or h < settings.bulb_end_hour
-
-        # --- Water solenoid ---
-        temps = [t for t in (ambient, floor) if t is not None]
-        max_temp = max(temps) if temps else None
-        if settings.solenoid_mode == "on":
-            solenoid = True
-        elif settings.solenoid_mode == "off":
-            solenoid = False
-            self.solenoid_auto_active = False
-        else:   # auto
-            if max_temp is None:
-                self.solenoid_auto_active = False      # no sensor -> stay safe (closed)
-            elif not self.solenoid_auto_active and max_temp >= settings.solenoid_trigger_temp:
-                self.solenoid_auto_active = True
-            elif self.solenoid_auto_active and max_temp < settings.solenoid_trigger_temp - SOLENOID_HYSTERESIS:
-                self.solenoid_auto_active = False
-            solenoid = self.solenoid_auto_active
+        if self.phase != "idle":
+            bulb = False                               # never heat while cooling down a heat event
         return bulb, solenoid
 
 
@@ -1666,6 +2013,11 @@ async function tick() {
   pill($("sol"), s.solenoid ? "ON" : "OFF", s.solenoid ? "ok" : "");
   $("bulbMode").textContent = s.bulb_mode ? "(" + s.bulb_mode + ")" : "";
   $("solMode").textContent = s.solenoid_mode ? "(" + s.solenoid_mode + (s.trigger ? " ≥" + s.trigger + "°C" : "") + ")" : "";
+  // same wording as the website relay card
+  if (s.cooling && s.cooling !== "normal") {
+    pill($("sol"), (s.solenoid ? "ON" : "OFF") + " · HEAT PROTECTION " + s.cooling, s.solenoid ? "ok" : "warn");
+    if (!s.bulb) pill($("bulb"), "OFF · forced by heat protection", "");
+  }
 
   // --- sound ---
   pill($("micState"), s.mic_state === "ok" && s.audio_quiet ? "quiet - AI skipped" : (s.mic_state || "off"),
@@ -1823,6 +2175,11 @@ def main():
         log.warning("Settings fetch failed (relays stay OFF until it works): %s", e)
 
     dashboard = None if args.no_dashboard else start_dashboard()
+    publisher = RelayStatePublisher(Supabase(sb_url, sb_key))
+    publisher.start()
+    sms_worker = SmsWorker(sb_url, sb_key)
+    sms_worker.start()
+    sms = SmsAlerts(sms_worker)
 
     for worker in (vision, audio):
         if worker:
@@ -1841,7 +2198,10 @@ def main():
         if now - last_settings >= SETTINGS_EVERY_S:
             last_settings = now
             try:
-                settings.apply(sb.select("system_settings", {"select": "setting_key,setting_value"}))
+                rows = sb.select("system_settings", {"select": "setting_key,setting_value"})
+                settings.apply(rows)
+                sms.check_test(next((r.get("setting_value") for r in rows
+                                     if r.get("setting_key") == "sms_test_request"), ""))
             except requests.RequestException as e:
                 log.warning("Settings fetch failed: %s", e)
 
@@ -1857,11 +2217,16 @@ def main():
         # --- 3. Relays ---
         bulb_on, solenoid_on = logic.decide(ambient, floor, datetime.now())
         relays.set(bulb_on, solenoid_on)
+        st = logic.state()
+        publisher.update({"bulb": relays.bulb_on, "solenoid": relays.solenoid_on,
+                          "bulb_mode": settings.bulb_mode, "solenoid_mode": settings.solenoid_mode, **st},
+                         (relays.bulb_on, relays.solenoid_on, st["phase"], st["cycle"]))
+        sms.tick(ambient, floor, logic, vision)
 
         live.update(ambient=ambient, floor=floor,
                     bulb=relays.bulb_on, solenoid=relays.solenoid_on,
                     bulb_mode=settings.bulb_mode, solenoid_mode=settings.solenoid_mode,
-                    trigger=settings.solenoid_trigger_temp, settings_loaded=settings.loaded,
+                    trigger=logic.trigger(), cooling=logic.status(), settings_loaded=settings.loaded,
                     cam_state=vision.state if vision else "off",
                     mic_state=audio.state if audio else "off",
                     cpu=cpu_temp())
@@ -1877,6 +2242,7 @@ def main():
         if audio_item or now - last_sync >= settings.sync_interval:
             last_sync = now
             audio_url, audio_result = audio_item if audio_item else (None, None)
+            sms.on_audio(audio_result)
             noise = audio.take_peak_db() if audio else None
             motion = bool(vision and vision.moving > 0 and time.time() - vision.last_frame_time < 30)
             row = {
@@ -1888,9 +2254,10 @@ def main():
             }
             try:
                 log_id = sb.insert_returning_id("sensor_logs", row)
-                log.info("[SENSORS] ambient=%s C floor=%s C noise=%s dB motion=%s bulb=%s solenoid=%s%s",
+                log.info("[SENSORS] ambient=%s C floor=%s C noise=%s dB motion=%s bulb=%s solenoid=%s cooling=%s%s",
                          ambient, floor, row["audio_level"], motion,
                          "ON" if relays.bulb_on else "OFF", "ON" if relays.solenoid_on else "OFF",
+                         logic.status(),
                          " +clip" if audio_url else "")
                 if audio_result:
                     sb.insert("audio_detections", {"sensor_log_id": log_id, "audio_url": audio_url, **audio_result})
@@ -1907,6 +2274,7 @@ def main():
                          f"settings={'ok' if settings.loaded else 'NOT_LOADED'}")
             if audio:
                 pi_status += " " + audio.status_text()
+            pi_status += " " + sms_worker.status_text()
             for key, value in (("pi_status", pi_status),
                                ("cam_status", vision.status_text() if vision else None)):
                 if value is None:

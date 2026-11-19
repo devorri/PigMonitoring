@@ -1,5 +1,6 @@
 import { createClient, SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
-import type { Contact, NewContact, NewSensorLog, SensorLog, SystemSetting } from '../types';
+import type { AudioDetection, Contact, NewContact, NewSensorLog, SensorLog, SmsLog, SystemSetting } from '../types';
+import { SETTINGS_SPEC } from './settingsSpec';
 
 // Default Supabase project details from user's environment or provided reference
 const DEFAULT_SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://rembfnigpvtuxoyjjexf.supabase.co';
@@ -52,7 +53,9 @@ export const resetSupabaseClient = () => {
 export const subscribeToRealtimeChanges = (
   onSensorLogChange: (payload: any) => void,
   onContactChange: (payload: any) => void,
-  onSettingChange: (payload: any) => void
+  onSettingChange: (payload: any) => void,
+  onAudioDetectionChange?: (payload: any) => void,
+  onSmsLogChange?: (payload: any) => void
 ): RealtimeChannel | null => {
   const client = getSupabaseClient();
   if (!client) return null;
@@ -73,6 +76,16 @@ export const subscribeToRealtimeChanges = (
       'postgres_changes',
       { event: '*', schema: 'public', table: 'system_settings' },
       (payload) => onSettingChange(payload)
+    )
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'audio_detections' },
+      (payload) => onAudioDetectionChange?.(payload)
+    )
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'sms_logs' },
+      (payload) => onSmsLogChange?.(payload)
     )
     .subscribe((status) => {
       console.log('Supabase Realtime Connection Status:', status);
@@ -113,74 +126,13 @@ const INITIAL_CONTACTS: Contact[] = [
   },
 ];
 
-const INITIAL_SETTINGS: SystemSetting[] = [
-  {
-    id: 1,
-    setting_key: 'temp_threshold_high',
-    setting_value: '26.5',
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 2,
-    setting_key: 'temp_threshold_low',
-    setting_value: '18.0',
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 3,
-    setting_key: 'noise_alert_level',
-    setting_value: '75',
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 4,
-    setting_key: 'motion_sensitivity',
-    setting_value: 'High',
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 5,
-    setting_key: 'alert_sms_enabled',
-    setting_value: 'true',
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 6,
-    setting_key: 'auto_ventilation_mode',
-    setting_value: 'Automatic (Smart Thermal)',
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 7,
-    setting_key: 'bulb_mode',
-    setting_value: 'auto',
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 8,
-    setting_key: 'solenoid_mode',
-    setting_value: 'auto',
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 9,
-    setting_key: 'solenoid_trigger_temp',
-    setting_value: '38.0',
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 10,
-    setting_key: 'bulb_start_hour',
-    setting_value: '18',
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 11,
-    setting_key: 'bulb_end_hour',
-    setting_value: '6',
-    updated_at: new Date().toISOString(),
-  },
-];
+// Demo-mode settings = the same defaults the Pi uses (src/lib/settingsSpec.ts)
+const INITIAL_SETTINGS: SystemSetting[] = SETTINGS_SPEC.filter((sp) => sp.kind !== 'status').map((sp, i) => ({
+  id: i + 1,
+  setting_key: sp.key,
+  setting_value: sp.default,
+  updated_at: new Date().toISOString(),
+}));
 
 const SAMPLE_PIG_IMAGES = [
   'https://images.unsplash.com/photo-1516467508483-a7212febe31a?auto=format&fit=crop&w=1000&q=80',
@@ -385,6 +337,59 @@ export const addSensorLog = async (log: NewSensorLog): Promise<SensorLog> => {
   const updated = [newLogObj, ...logs];
   setLocalData(LOCAL_STORAGE_KEYS.SENSOR_LOGS, updated);
   return newLogObj;
+};
+
+// Data Layer APIs for Audio Detections (written by the Pi, read-only here)
+export const normalizeAudioDetection = (d: any): AudioDetection => ({
+  id: Number(d?.id) || 0,
+  created_at: d?.created_at || new Date().toISOString(),
+  sensor_log_id: d?.sensor_log_id != null ? Number(d.sensor_log_id) : null,
+  audio_url: d?.audio_url || null,
+  top_class: d?.top_class ?? null,
+  cough_prob: d?.cough_prob != null ? Number(d.cough_prob) : null,
+  stress_prob: d?.stress_prob != null ? Number(d.stress_prob) : null,
+  cough_events: Number(d?.cough_events) || 0,
+  stress_events: Number(d?.stress_events) || 0,
+  status: d?.status ?? null,
+});
+
+export const fetchAudioDetections = async (limit = 100): Promise<AudioDetection[]> => {
+  const client = getSupabaseClient();
+  if (!client) return [];
+  try {
+    const { data, error } = await client
+      .from('audio_detections')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (!error && data) return data.map(normalizeAudioDetection);
+  } catch (e) {
+    console.warn('Supabase fetch audio_detections failed', e);
+  }
+  return [];
+};
+
+// Data Layer APIs for SMS logs (written by the Pi, read-only here)
+export const normalizeSmsLog = (d: any): SmsLog => ({
+  id: Number(d?.id) || 0,
+  created_at: d?.created_at || new Date().toISOString(),
+  alert_type: d?.alert_type ?? null,
+  message: d?.message ?? null,
+  numbers: d?.numbers ?? null,
+  status: d?.status ?? null,
+  error: d?.error ?? null,
+});
+
+export const fetchSmsLogs = async (limit = 50): Promise<SmsLog[]> => {
+  const client = getSupabaseClient();
+  if (!client) return [];
+  try {
+    const { data, error } = await client.from('sms_logs').select('*').order('created_at', { ascending: false }).limit(limit);
+    if (!error && data) return data.map(normalizeSmsLog);
+  } catch (e) {
+    console.warn('Supabase fetch sms_logs failed', e);
+  }
+  return [];
 };
 
 // Data Layer APIs for System Settings

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import type { NewSensorLog, SensorLog } from '../types';
+import type { AudioDetection, NewSensorLog, SensorLog, SystemSetting } from '../types';
+import { settingNumber } from '../lib/settingsSpec';
 import { 
   Search, 
   Filter, 
@@ -19,10 +20,17 @@ import {
 
 interface SensorLogsViewProps {
   logs: SensorLog[];
+  settings: SystemSetting[];
+  audioDetections: AudioDetection[];
   onAddLog: (newLog: NewSensorLog) => void;
 }
 
-export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }) => {
+export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, settings, audioDetections, onAddLog }) => {
+  // Same thresholds the Pi uses (shared settings spec)
+  const heatTemp = settingNumber(settings, 'solenoid_trigger_temp');
+  const noiseLevel = settingNumber(settings, 'noise_alert_level');
+  // audio_detections rows are linked to the sensor_logs row they were saved with
+  const detByLog = new Map(audioDetections.filter((d) => d.sensor_log_id != null).map((d) => [d.sensor_log_id as number, d]));
   const [searchTerm, setSearchTerm] = useState('');
   const [motionFilter, setMotionFilter] = useState<'all' | 'motion' | 'still'>('all');
   const [minAudio, setMinAudio] = useState<number>(0);
@@ -89,11 +97,11 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
   };
 
   const exportCSV = () => {
-    const headers = 'ID,Timestamp,Ambient Temp (°C),Floor Temp (°C),Motion Detected,Audio Level (dB),Image URL,Audio URL\n';
+    const headers = 'ID,Timestamp,Ambient Temp (°C),Floor Temp (°C),Motion Detected,Audio Level (dB),Audio AI Status,Top Sound,Coughs,Stress Events,Image URL,Audio URL\n';
     const rows = filteredLogs
       .map(
         (l) =>
-          `${l.id},"${new Date(l.created_at).toISOString()}",${l.ambient_temp ?? ''},${l.floor_temp ?? ''},${Boolean(l.motion_detected)},${l.audio_level ?? ''},"${l.image_url || ''}","${l.audio_url || ''}"`
+          `${l.id},"${new Date(l.created_at).toISOString()}",${l.ambient_temp ?? ''},${l.floor_temp ?? ''},${Boolean(l.motion_detected)},${l.audio_level ?? ''},"${detByLog.get(l.id)?.status ?? ''}","${detByLog.get(l.id)?.top_class ?? ''}",${detByLog.get(l.id)?.cough_events ?? ''},${detByLog.get(l.id)?.stress_events ?? ''},"${l.image_url || ''}","${l.audio_url || ''}"`
       )
       .join('\n');
     const blob = new Blob([headers + rows], { type: 'text/csv' });
@@ -109,15 +117,15 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
       {/* Top Header & Controls */}
       <div className="view-header">
         <div>
-          <h2 className="view-title">Sensor Logs & Telemetry History</h2>
-          <p className="view-subtitle">Detailed record of temperature, noise decibels, motion, and snapshot feeds</p>
+          <h1 className="view-title">Sensor logs</h1>
+          <p className="view-subtitle">Every reading the Pi saved, newest first.</p>
         </div>
         <div className="view-header-actions">
           <button className="secondary-btn" onClick={exportCSV}>
             <Download className="btn-icon" /> Export CSV
           </button>
           <button className="primary-btn" onClick={() => setIsAddModalOpen(true)}>
-            <Plus className="btn-icon" /> Add Sensor Entry
+            <Plus className="btn-icon" /> Add reading
           </button>
         </div>
       </div>
@@ -143,7 +151,7 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
               onChange={(e) => setMotionFilter(e.target.value as any)}
               className="filter-select"
             >
-              <option value="all">All Motion States</option>
+              <option value="all">All motion</option>
               <option value="motion">Motion Detected Only</option>
               <option value="still">Still / Idle Only</option>
             </select>
@@ -156,7 +164,7 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
               onChange={(e) => setMinAudio(Number(e.target.value))}
               className="filter-select"
             >
-              <option value={0}>All Noise Levels</option>
+              <option value={0}>All noise levels</option>
               <option value={50}>Min 50 dB</option>
               <option value={70}>Min 70 dB (High Noise)</option>
             </select>
@@ -170,20 +178,21 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
           <table className="logs-table">
             <thead>
               <tr>
-                <th>LOG ID</th>
-                <th>TIMESTAMP</th>
-                <th>AMBIENT TEMP</th>
-                <th>FLOOR TEMP</th>
-                <th>MOTION STATE</th>
-                <th>AUDIO LEVEL</th>
-                <th>ATTACHMENTS</th>
-                <th>ACTIONS</th>
+                <th>ID</th>
+                <th>Time</th>
+                <th>Ambient</th>
+                <th>Floor</th>
+                <th>Motion</th>
+                <th>Noise</th>
+                <th>Sound</th>
+                <th>Files</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {filteredLogs.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="empty-table-cell">
+                  <td colSpan={9} className="empty-table-cell">
                     No sensor logs match your filter criteria.
                   </td>
                 </tr>
@@ -204,26 +213,44 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
                       </div>
                     </td>
                     <td>
-                      <span className={`temp-badge ${log.ambient_temp != null && log.ambient_temp > 26.5 ? 'warm' : 'normal'}`}>
+                      <span className={`temp-badge ${log.ambient_temp != null && log.ambient_temp >= heatTemp ? 'warm' : 'normal'}`}>
                         <Thermometer className="w-3.5 h-3.5 mr-1 inline" />
-                        {log.ambient_temp != null ? `${log.ambient_temp}°C` : '--'}
+                        {log.ambient_temp != null ? `${Number(log.ambient_temp).toFixed(1)}°C` : '--'}
                       </span>
                     </td>
                     <td>
-                      <span className="floor-badge">{log.floor_temp != null ? `${log.floor_temp}°C` : '--'}</span>
+                      <span className={`temp-badge ${log.floor_temp == null ? '' : log.floor_temp >= heatTemp ? 'warm' : 'floor'}`}>
+                        <Thermometer className="w-3.5 h-3.5 mr-1 inline" />
+                        {log.floor_temp != null ? `${Number(log.floor_temp).toFixed(1)}°C` : '--'}
+                      </span>
                     </td>
                     <td>
                       <span className={`motion-badge ${log.motion_detected ? 'detected' : 'idle'}`}>
                         <Activity className="w-3.5 h-3.5 mr-1 inline" />
-                        {log.motion_detected ? 'Detected' : 'No Motion'}
+                        {log.motion_detected ? 'Moving' : 'Still'}
                       </span>
                     </td>
                     <td>
                       <div className="audio-cell">
-                        <span className={`audio-pill ${log.audio_level != null && log.audio_level > 75 ? 'alert' : ''}`}>
+                        <span className={`audio-pill ${log.audio_level != null && log.audio_level > noiseLevel ? 'alert' : ''}`}>
                           {log.audio_level != null ? `${log.audio_level} dB` : '--'}
                         </span>
                       </div>
+                    </td>
+                    <td>
+                      {(() => {
+                        const d = detByLog.get(log.id);
+                        if (!d) return <span className="text-slate-400">--</span>;
+                        return (
+                          <span
+                            className={`audio-pill ${d.status === 'ATTENTION NEEDED' ? 'alert' : ''}`}
+                            title={`${d.top_class ?? ''} · cough ${Math.round((d.cough_prob ?? 0) * 100)}% · stress ${Math.round((d.stress_prob ?? 0) * 100)}%`}
+                          >
+                            {d.status === 'ATTENTION NEEDED' ? '⚠ ' : '✓ '}
+                            {d.cough_events} cough · {d.stress_events} stress
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td>
                       <div className="attachment-icons">
@@ -233,7 +260,7 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
                     </td>
                     <td>
                       <button className="view-detail-btn" onClick={(e) => { e.stopPropagation(); setSelectedLog(log); }}>
-                        View Details
+                        View
                       </button>
                     </td>
                   </tr>
@@ -298,13 +325,13 @@ export const SensorLogsView: React.FC<SensorLogsViewProps> = ({ logs, onAddLog }
                 <div className="metric-row">
                   <span className="metric-label">Ambient Temperature</span>
                   <span className="metric-value text-rose-400 font-bold">
-                    {selectedLog.ambient_temp != null ? `${selectedLog.ambient_temp}°C` : 'N/A'}
+                    {selectedLog.ambient_temp != null ? `${Number(selectedLog.ambient_temp).toFixed(1)}°C` : 'N/A'}
                   </span>
                 </div>
                 <div className="metric-row">
                   <span className="metric-label">Floor Surface Temp</span>
                   <span className="metric-value text-amber-400 font-bold">
-                    {selectedLog.floor_temp != null ? `${selectedLog.floor_temp}°C` : 'N/A'}
+                    {selectedLog.floor_temp != null ? `${Number(selectedLog.floor_temp).toFixed(1)}°C` : 'N/A'}
                   </span>
                 </div>
                 <div className="metric-row">

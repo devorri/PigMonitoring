@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { Contact, NewContact } from '../types';
+import { normalizePhNumber } from '../lib/sms';
 import { 
   Plus, 
   Search, 
@@ -15,6 +16,7 @@ import {
 } from 'lucide-react';
 
 interface ContactsViewProps {
+  topSlot?: React.ReactNode;
   contacts: Contact[];
   onAddContact: (contact: NewContact) => void;
   onUpdateContact: (id: number, updates: Partial<Contact>) => void;
@@ -22,6 +24,7 @@ interface ContactsViewProps {
 }
 
 export const ContactsView: React.FC<ContactsViewProps> = ({
+  topSlot,
   contacts,
   onAddContact,
   onUpdateContact,
@@ -111,15 +114,17 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
       {/* View Header */}
       <div className="view-header">
         <div>
-          <h2 className="view-title">Emergency Alert Contacts</h2>
-          <p className="view-subtitle">Manage personnel notified during critical climate or squeal alerts</p>
+          <h1 className="view-title">Contacts & SMS</h1>
+          <p className="view-subtitle">People who get SMS alerts from the Pi, and the SMS tools.</p>
         </div>
         <button className="primary-btn" onClick={openAddModal}>
-          <Plus className="btn-icon" /> Add New Contact
+          <Plus className="btn-icon" /> Add contact
         </button>
       </div>
 
       {/* Filter & Search Bar */}
+      {topSlot}
+
       <div className="filter-toolbar">
         <div className="search-input-wrapper">
           <Search className="search-icon" />
@@ -164,7 +169,7 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
               No contacts match your query. Add your first emergency phone contact to receive alert SMS updates.
             </p>
             <button className="primary-btn mt-4" onClick={openAddModal}>
-              <Plus className="w-4 h-4 mr-1.5" /> Add First Contact
+              <Plus className="w-4 h-4 mr-1.5" /> Add first contact
             </button>
           </div>
         ) : (
@@ -252,15 +257,18 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
                 </div>
 
                 <div className="form-group full-width">
-                  <label className="form-label">Phone Number (with Country Code)</label>
+                  <label className="form-label">PH Mobile Number</label>
                   <input
                     type="tel"
                     required
-                    placeholder="e.g. +1 (555) 019-2834"
+                    placeholder="e.g. 0912 345 6789"
                     value={phoneInput}
                     onChange={(e) => setPhoneInput(e.target.value)}
                     className="form-input"
                   />
+                  {phoneInput.trim() && !normalizePhNumber(phoneInput) && (
+                    <span className="text-xs" style={{ color: '#b45309' }}>Not a PH mobile number (09XX / +63 9XX), SMS alerts can't reach it.</span>
+                  )}
                 </div>
 
                 <div className="form-group full-width">
@@ -327,6 +335,9 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
                     onChange={(e) => setPhoneInput(e.target.value)}
                     className="form-input"
                   />
+                  {phoneInput.trim() && !normalizePhNumber(phoneInput) && (
+                    <span className="text-xs" style={{ color: '#b45309' }}>Not a PH mobile number (09XX / +63 9XX), SMS alerts can't reach it.</span>
+                  )}
                 </div>
 
                 <div className="form-group full-width">

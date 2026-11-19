@@ -25,6 +25,7 @@ import {
   type CoughCheck,
   type CoughSettings,
 } from '../lib/coughDetector';
+import { sendSmsFromWeb } from '../lib/sms';
 import './AudioTesterView.css';
 
 const MAX_SECONDS = 120;
@@ -52,6 +53,9 @@ export const AudioTesterView: React.FC<AudioTesterViewProps> = ({ settings }) =>
   const [truncated, setTruncated] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [showRejected, setShowRejected] = useState(false);
+  // Simulation: text the active contacts when the uploaded audio has a cough
+  const [smsOnCough, setSmsOnCough] = useState(true);
+  const [smsState, setSmsState] = useState<{ kind: 'sending' | 'sent' | 'failed'; text: string } | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
   const [recording, setRecording] = useState(false);
@@ -69,10 +73,25 @@ export const AudioTesterView: React.FC<AudioTesterViewProps> = ({ settings }) =>
 
   const effective: CoughSettings = { ...piSettings, threshold, useGate };
 
-  const run = async (x: Float32Array, st: CoughSettings) => {
+  const sendCoughSms = async (r: AnalysisResult, name: string) => {
+    setSmsState({ kind: 'sending', text: 'Cough found. Sending SMS to the active contacts…' });
+    const res = await sendSmsFromWeb('sim_upload', undefined, {
+      coughs: r.coughs.length,
+      best: Math.max(...r.coughs.map((c) => c.score)),
+      file: name,
+    });
+    setSmsState(
+      res.ok
+        ? { kind: 'sent', text: `SMS sent to ${res.numbers.length} contact${res.numbers.length === 1 ? '' : 's'}: "${res.message}"` }
+        : { kind: 'failed', text: `SMS not sent: ${res.error}` },
+    );
+  };
+
+  const run = async (x: Float32Array, st: CoughSettings, smsName?: string) => {
     setError(null);
     setResult(null);
     setShowRejected(false);
+    setSmsState(null);
     try {
       setStage('model');
       setProgress(0);
@@ -82,6 +101,7 @@ export const AudioTesterView: React.FC<AudioTesterViewProps> = ({ settings }) =>
       const r = await analyzeAudio(session, x, st, setProgress);
       setResult(r);
       setStage('done');
+      if (smsName && smsOnCough && r.coughs.length > 0) void sendCoughSms(r, smsName);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setStage('error');
@@ -101,7 +121,7 @@ export const AudioTesterView: React.FC<AudioTesterViewProps> = ({ settings }) =>
       if (cut) x = x.slice(0, MAX_SECONDS * SAMPLE_RATE);
       setTruncated(cut);
       setSamples(x);
-      await run(x, effective);
+      await run(x, effective, name);
     } catch (e) {
       setError(
         `Couldn't read this file (${e instanceof Error ? e.message : String(e)}). ` +
@@ -253,6 +273,10 @@ export const AudioTesterView: React.FC<AudioTesterViewProps> = ({ settings }) =>
               />
             </label>
             <label className="at-check">
+              <input type="checkbox" checked={smsOnCough} onChange={(e) => setSmsOnCough(e.target.checked)} disabled={busy} />
+              Send SMS when a cough is found
+            </label>
+            <label className="at-check">
               <input type="checkbox" checked={useGate} onChange={(e) => setUseGate(e.target.checked)} disabled={busy} />
               Skip quiet parts (like the Pi, min {piSettings.minDb} dB)
             </label>
@@ -311,6 +335,20 @@ export const AudioTesterView: React.FC<AudioTesterViewProps> = ({ settings }) =>
           {truncated && (
             <div className="at-note">
               <Info className="btn-icon" /> Only the first {MAX_SECONDS}s were checked.
+            </div>
+          )}
+          {smsState && (
+            <div className={`at-note ${smsState.kind === 'failed' ? 'warn' : ''}`}>
+              <Info className="btn-icon" /> <span>{smsState.text}</span>
+            </div>
+          )}
+          {result.coughs.length > 0 && !smsState && (
+            <div className="at-note">
+              <Info className="btn-icon" />
+              <span>No SMS sent for this check.</span>
+              <button className="secondary-btn" onClick={() => void sendCoughSms(result, fileName ?? 'audio')}>
+                Send SMS now
+              </button>
             </div>
           )}
           {settingsChanged && (

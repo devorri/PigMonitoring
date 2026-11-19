@@ -1,14 +1,18 @@
 import { useState, useEffect } from 'react';
-import { Navbar } from './components/Navbar';
+import { Navbar, type AppTab } from './components/Navbar';
+import { SoundView } from './components/SoundView';
 import { DashboardOverview } from './components/DashboardOverview';
 import { SensorLogsView } from './components/SensorLogsView';
 import { ContactsView } from './components/ContactsView';
+import { SmsAlertsPanel } from './components/SmsAlertsPanel';
 import { SystemSettingsView } from './components/SystemSettingsView';
-import { AudioTesterView } from './components/AudioTesterView';
+import { PI_OFFLINE_AFTER_S, PI_WRITTEN_KEYS, parseRelayState } from './lib/settingsSpec';
 import { SupabaseConfigModal } from './components/SupabaseConfigModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import type { 
+  AudioDetection,
   Contact, 
+  SmsLog,
   NewContact, 
   NewSensorLog, 
   SensorLog, 
@@ -24,18 +28,29 @@ import {
   fetchSystemSettings, 
   updateSystemSetting,
   resetLocalDatabase,
+  fetchAudioDetections,
+  normalizeAudioDetection,
+  fetchSmsLogs,
+  normalizeSmsLog,
   subscribeToRealtimeChanges,
   normalizeSensorLog
 } from './lib/supabase';
 import { CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'logs' | 'contacts' | 'tester' | 'settings'>('overview');
+  const [activeTab, setActiveTab] = useState<AppTab>('overview');
   
   // Data States
   const [logs, setLogs] = useState<SensorLog[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [audioDetections, setAudioDetections] = useState<AudioDetection[]>([]);
+  const [smsLogs, setSmsLogs] = useState<SmsLog[]>([]);
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setClock(Date.now()), 5000);
+    return () => window.clearInterval(id);
+  }, []);
   
   // Status Flags
   const [isLoading, setIsLoading] = useState(true);
@@ -56,15 +71,19 @@ export function App() {
         fetchSensorLogs(),
         fetchContacts(),
         fetchSystemSettings(),
+        fetchAudioDetections(),
+        fetchSmsLogs(),
       ]);
       const timeout = new Promise<never>((_, reject) => {
         window.setTimeout(() => reject(new Error('Telemetry request timed out')), 5000);
       });
-      const [logsRes, contactsRes, settingsRes] = await Promise.race([dataRequest, timeout]);
+      const [logsRes, contactsRes, settingsRes, audioRes, smsRes] = await Promise.race([dataRequest, timeout]);
 
       setLogs(logsRes.data);
       setContacts(contactsRes.data);
       setSettings(settingsRes.data);
+      setAudioDetections(audioRes);
+      setSmsLogs(smsRes);
 
       setIsMock(logsRes.isMock && contactsRes.isMock && settingsRes.isMock);
     } catch (e) {
@@ -122,7 +141,28 @@ export function App() {
             }
             return [...prev, updatedSetting];
           });
-          showToast(`Realtime Setting updated: ${updatedSetting.setting_key}`);
+          // relay_state / pi_status / cam_status change every few seconds -> no toast
+          if (!PI_WRITTEN_KEYS.has(updatedSetting.setting_key)) {
+            showToast(`Realtime Setting updated: ${updatedSetting.setting_key}`);
+          }
+        }
+      },
+      // On new audio AI result from the Pi
+      (payload) => {
+        if (payload.new) {
+          const det = normalizeAudioDetection(payload.new);
+          setAudioDetections((prev) => (prev.some((d) => d.id === det.id) ? prev : [det, ...prev]));
+          if (det.status === 'ATTENTION NEEDED') {
+            showToast(`Audio AI: ${det.top_class} (${det.cough_events} cough / ${det.stress_events} stress)`, 'warning');
+          }
+        }
+      },
+      // On SMS sent by the Pi
+      (payload) => {
+        if (payload.new) {
+          const sms = normalizeSmsLog(payload.new);
+          setSmsLogs((prev) => (prev.some((l) => l.id === sms.id) ? prev : [sms, ...prev]));
+          showToast(sms.status === 'sent' ? `SMS sent: ${sms.alert_type}` : `SMS failed: ${sms.error}`, sms.status === 'sent' ? 'info' : 'warning');
         }
       }
     );
@@ -212,48 +252,60 @@ export function App() {
 
   const activeContactsCount = contacts.filter((c) => c.is_active).length;
 
+  const relay = parseRelayState(settings);
+  const piOnline = !!relay && clock / 1000 - relay.t < PI_OFFLINE_AFTER_S;
+
+  const PAGE_HEAD: Partial<Record<AppTab, { title: string; sub: string }>> = {
+    overview: { title: 'Overview', sub: 'How the pen is doing right now.' },
+    controls: { title: 'Controls', sub: 'Heating bulb and water sprinkler. Heat protection always has the last word.' },
+    camera: { title: 'Camera', sub: 'Live view from the pen with pig detection.' },
+    sound: { title: 'Sound', sub: 'Coughs and stress sounds picked up by the barn microphone.' },
+  };
+  const head = PAGE_HEAD[activeTab];
+
   return (
-    <div className="app-container">
-      {/* Top Navbar Header */}
+    <div className="app-shell">
       <Navbar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         isMock={isMock}
         onOpenConfig={() => setIsConfigModalOpen(true)}
         activeContactsCount={activeContactsCount}
+        piOnline={piOnline}
       />
 
-      {/* Toast Notification Banner */}
       {toastMessage && (
-        <div className={`fixed bottom-6 right-6 z-50 flex items-center space-x-3 px-4 py-3 rounded-xl border shadow-xl transition-all duration-300 bg-white ${
-          toastMessage.type === 'warning'
-            ? 'border-amber-300 text-amber-900 shadow-amber-500/10'
-            : toastMessage.type === 'info'
-            ? 'border-indigo-200 text-indigo-900 shadow-indigo-500/10'
-            : 'border-pink-200 text-slate-800 shadow-pink-500/10'
-        }`}>
-          {toastMessage.type === 'warning' ? (
-            <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0" />
-          ) : (
-            <CheckCircle2 className="w-5 h-5 text-pink-600 flex-shrink-0" />
-          )}
-          <span className="text-sm font-semibold">{toastMessage.text}</span>
+        <div className={`toast toast-${toastMessage.type}`} role="status">
+          {toastMessage.type === 'warning' ? <AlertTriangle className="btn-icon" /> : <CheckCircle2 className="btn-icon" />}
+          <span>{toastMessage.text}</span>
         </div>
       )}
 
       {/* Main Page Area */}
       <main className="main-content">
+        {head && !isLoading && (
+          <header className="view-header">
+            <div>
+              <h1 className="view-title">{head.title}</h1>
+              <p className="view-subtitle">{head.sub}</p>
+            </div>
+          </header>
+        )}
         {isLoading ? (
-          <div className="flex flex-col items-center justify-center py-24 space-y-4">
-            <RefreshCw className="w-10 h-10 text-rose-500 animate-spin" />
-            <p className="text-slate-400 font-semibold text-sm">Synchronizing Real-Time Telemetry...</p>
+          <div className="loading-state">
+            <RefreshCw className="loading-icon animate-spin" />
+            <p>Loading the latest readings…</p>
           </div>
         ) : (
           <ErrorBoundary>
-            {activeTab === 'overview' && (
+            {(activeTab === 'overview' || activeTab === 'controls' || activeTab === 'camera') && (
               <DashboardOverview
+                key={activeTab}
+                section={activeTab}
                 logs={logs}
                 settings={settings}
+                audioDetections={audioDetections}
+                smsLogs={smsLogs}
                 onNavigateLogs={() => setActiveTab('logs')}
                 onNavigateSettings={() => setActiveTab('settings')}
                 onUpdateSetting={handleUpdateSetting}
@@ -261,11 +313,25 @@ export function App() {
             )}
 
             {activeTab === 'logs' && (
-              <SensorLogsView logs={logs} onAddLog={handleAddSensorLog} />
+              <SensorLogsView
+                logs={logs}
+                settings={settings}
+                audioDetections={audioDetections}
+                onAddLog={handleAddSensorLog}
+              />
             )}
 
             {activeTab === 'contacts' && (
               <ContactsView
+                topSlot={
+                  <SmsAlertsPanel
+                    settings={settings}
+                    contacts={contacts}
+                    smsLogs={smsLogs}
+                    onUpdateSetting={handleUpdateSetting}
+                    onOpenSettings={() => setActiveTab('settings')}
+                  />
+                }
                 contacts={contacts}
                 onAddContact={handleAddContact}
                 onUpdateContact={handleUpdateContact}
@@ -273,7 +339,7 @@ export function App() {
               />
             )}
 
-            {activeTab === 'tester' && <AudioTesterView settings={settings} />}
+            {activeTab === 'sound' && <SoundView audioDetections={audioDetections} settings={settings} />}
 
             {activeTab === 'settings' && (
               <SystemSettingsView
