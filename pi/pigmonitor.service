@@ -1,0 +1,20 @@
+[Unit]
+Description=Pig Monitoring - Raspberry Pi (camera AI, mic AI, temp sensor, relays)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# install.sh fills in your username and folder automatically.
+User=vid
+WorkingDirectory=/home/vid/vid
+ExecStart=/home/vid/vid/venv/bin/python /home/vid/vid/app.py
+Environment=PYTHONUNBUFFERED=1
+SupplementaryGroups=dialout i2c gpio audio
+Restart=always
+RestartSec=5
+# On stop, give app.py time to switch the relays OFF
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

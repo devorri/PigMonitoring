@@ -30,3 +30,7 @@ __pycache__/
 runs/
 archive/
 .audio_worker_state.json
+
+# Raspberry Pi engine
+pi/venv/
+pi/models/

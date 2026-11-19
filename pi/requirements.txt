@@ -1,0 +1,7 @@
+onnxruntime>=1.17
+numpy
+pillow
+requests
+pyserial
+smbus2
+# gpiozero + lgpio come from apt (python3-gpiozero, python3-lgpio), see install.sh

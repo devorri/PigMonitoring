@@ -1,6 +1,17 @@
+/*
+ * ========================================================
+ *  PIG MONITORING SYSTEM - MAIN ESP32
+ *  This is the version that ran without crashing, with ONLY these changes:
+ *   1. SIM800L / camera link / SMS removed (not on this board anymore)
+ *   2. Pins updated to the current wiring (see below)
+ *   3. Relays only follow Supabase (nothing stored on the board, OFF until loaded)
+ *   4. Serial shows the mic level after each clip
+ *  Audio is recorded to LittleFS then uploaded, exactly like that version.
+ * ========================================================
+ */
+
 #include <Arduino.h>
 #include <Wire.h>
-#include <HardwareSerial.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <HTTPClient.h>
@@ -10,49 +21,44 @@
 #include <ArduinoJson.h>
 #include <Adafruit_MLX90614.h>
 #include <driver/i2s.h>
-#include <vector>
+#include <esp_system.h>
 #include <time.h>
 
 // ========================================================
-// --- PIN DEFINITIONS & HARDWARE MAPPING ---
+// --- PIN DEFINITIONS (change here if your wiring differs) ---
 // ========================================================
-#define SIM_RX_PIN 16
-#define SIM_TX_PIN 17
-#define CAM_RX_PIN 26
-#define CAM_TX_PIN 27   // -> wire to ESP32-CAM GPIO13 (plus common GND)
-
-#define PIR_PIN 13
-#define RELAY_IN1 14  // Heating Bulb Relay
-#define RELAY_IN2 12  // Water Solenoid Relay
+#define RELAY_IN1 14  // Heating Bulb Relay   (2-ch module IN1)
+#define RELAY_IN2 12  // Water Solenoid Relay (2-ch module IN2)
 
 // Active-Low Relay Logic (LOW = ON, HIGH = OFF)
 #define RELAY_ON  LOW
 #define RELAY_OFF HIGH
 
-// INMP441 I2S Microphone Pins
-#define I2S_WS 25
-#define I2S_SD 35
-#define I2S_SCK 33
+// INMP441 I2S Microphone Pins (VDD -> 3.3V, GND -> GND, L/R -> GND)
+#define I2S_SCK 18
+#define I2S_WS  19
+#define I2S_SD  23
 #define I2S_PORT I2S_NUM_0
+
+// MLX90614: SDA 21, SCL 22
 
 // ========================================================
 // --- HARDWARE & STORAGE OBJECTS ---
 // ========================================================
-HardwareSerial sim800(2);
-HardwareSerial camSerial(1);
 Adafruit_MLX90614 mlx = Adafruit_MLX90614();
 Preferences preferences;
-SemaphoreHandle_t i2sMutex;   // Only ONE reader of the I2S port at a time
+SemaphoreHandle_t i2sMutex;      // Only ONE reader of the I2S port at a time
+WiFiClientSecure secureClient;   // ONE shared TLS connection (no new handshake every request)
 
 // ========================================================
 // --- SUPABASE CONFIGURATION ---
 // ========================================================
 #define SUPABASE_URL "https://rembfnigpvtuxoyjjexf.supabase.co"
 const char* supabaseSettingsUrl = SUPABASE_URL "/rest/v1/system_settings";
-const char* supabaseContactsUrl = SUPABASE_URL "/rest/v1/contacts?is_active=eq.true";
 const char* supabaseAudioUrl    = SUPABASE_URL "/storage/v1/object/audio/periodic_sound.wav";
 const char* supabaseAudioPublic = SUPABASE_URL "/storage/v1/object/public/audio/periodic_sound.wav";
 const char* supabaseSensorUrl   = SUPABASE_URL "/rest/v1/sensor_logs";
+const char* supabaseStatusUrl   = SUPABASE_URL "/rest/v1/system_settings?setting_key=eq.main_status";
 const char* supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJlbWJmbmlncHZ0dXhveWpqZXhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg2NDUzMTksImV4cCI6MjEwNDIyMTMxOX0.HIZvxN9LRPQl_9vh-bY1rqaMbh2mHhvGWIqZrR9ZftA";
 
 // ========================================================
@@ -63,33 +69,29 @@ const char* supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 #define AUDIO_GAIN_SHIFT    14        // 16 = no gain, 15 = 2x, 14 = 4x (clipped safely)
 #define AUDIO_FILE          "/periodic_sound.wav"
 
+// ========================================================
+// --- CRASH PROTECTION ---
+// ========================================================
+#define MIN_SAFE_HEAP_BLOCK 30000     // a TLS connection needs ~30KB in one block
+unsigned long lastStatusReport = 0;
+const unsigned long STATUS_INTERVAL_MS = 60000;
+String bootReason = "";
+
 // Shared variables
 volatile int currentAudioLevel = 0;
-const int AUDIO_NOISE_THRESHOLD = 50000;
 unsigned long lastSyncUpdate = 0;
 unsigned long syncInterval = 15000;          // Cloud telemetry sync: every 15s
 unsigned long lastAudioUpload = 0;
-unsigned long audioInterval = 60000;         // Audio clip upload: every 60s (setting: audio_interval_seconds)
+unsigned long audioInterval = 60000;         // Audio clip: every 60s (setting: audio_interval_seconds)
 unsigned long lastSettingsFetch = 0;
 const unsigned long settingsFetchInterval = 10000; // Check DB every 10s for manual controls
 
-// --- SMS TIMERS ---
-int lastReportedHour = -1;                 // Tracks hourly SMS
-unsigned long lastHourlySMSFallback = 0;   // Fallback if NTP is offline
-const unsigned long ONE_HOUR_MS = 3600000; // 1 Hour in milliseconds
-
-unsigned long lastAlertSMSTime = 0;        // Emergency alert cooldown
-const unsigned long ALERT_COOLDOWN_MS = 300000; // 5 minutes cooldown for emergency alerts
-
-// --- CAMERA SNAPSHOT TRIGGER ---
-unsigned long lastSnapCmdTime = 0;
-const unsigned long SNAP_COOLDOWN_MS = 30000;   // Max 1 alert snapshot every 30s
-
 // ========================================================
-// --- RELAY MODES & AUTOMATION RULES ---
+// --- RELAY MODES & RULES (all from Supabase) ---
 // ========================================================
-String bulbMode = "auto";
-String solenoidMode = "auto";
+bool settingsLoaded = false;      // relays stay OFF until settings arrive from Supabase
+String bulbMode = "off";
+String solenoidMode = "off";
 
 int bulbStartHour = 18;           // 6:00 PM (18:00)
 int bulbEndHour = 6;              // 6:00 AM (06:00)
@@ -97,7 +99,38 @@ float solenoidTriggerTemp = 38.0; // Open solenoid at 38°C and up
 float solenoidHysteresis = 1.0;   // Shut off < 37°C
 bool solenoidAutoActive = false;
 
-std::vector<String> activePhoneNumbers;
+// ========================================================
+// --- RESET REASON / SAFE RESTART ---
+// ========================================================
+String resetReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "POWER_ON";
+    case ESP_RST_SW:       return "SOFTWARE_RESTART";
+    case ESP_RST_PANIC:    return "CRASH_PANIC";
+    case ESP_RST_INT_WDT:  return "CRASH_INT_WATCHDOG";
+    case ESP_RST_TASK_WDT: return "CRASH_TASK_WATCHDOG";
+    case ESP_RST_WDT:      return "CRASH_WATCHDOG";
+    case ESP_RST_BROWNOUT: return "BROWNOUT_POWER_DIP";
+    case ESP_RST_EXT:      return "RESET_BUTTON";
+    default:               return "OTHER";
+  }
+}
+
+void safeRestart(const String& why) {
+  Serial.println("[SYSTEM] Planned restart: " + why);
+  preferences.putString("restart_why", why);
+  digitalWrite(RELAY_IN1, RELAY_OFF);
+  digitalWrite(RELAY_IN2, RELAY_OFF);
+  delay(200);
+  ESP.restart();
+}
+
+void checkHeap() {
+  if (ESP.getMaxAllocHeap() < MIN_SAFE_HEAP_BLOCK) {
+    safeRestart("LOW_MEMORY heap=" + String(ESP.getFreeHeap()) +
+                " block=" + String(ESP.getMaxAllocHeap()));
+  }
+}
 
 // ========================================================
 // --- I2S MICROPHONE SETUP (INMP441) ---
@@ -153,125 +186,91 @@ void audioTask(void *pvParameters) {
 }
 
 // ========================================================
-// --- ROBUST SIM800L SMS TRANSMISSION ---
+// --- SHARED HTTPS HELPERS ---
 // ========================================================
-bool sendSMS(String phoneNumber, String message) {
-  while (sim800.available()) {
-    sim800.read();
-  }
-
-  sim800.println("AT+CMGF=1");
-  delay(150);
-
-  sim800.print("AT+CMGS=\"");
-  sim800.print(phoneNumber);
-  sim800.println("\"");
-  delay(200);
-
-  sim800.print(message);
-  delay(100);
-
-  sim800.write(26); // Ctrl+Z to send
-
-  unsigned long startWait = millis();
-  bool success = false;
-  while (millis() - startWait < 6000) {
-    if (sim800.available()) {
-      String response = sim800.readString();
-      if (response.indexOf("OK") != -1 || response.indexOf("+CMGS") != -1) {
-        success = true;
-        break;
-      } else if (response.indexOf("ERROR") != -1) {
-        success = false;
-        break;
-      }
-    }
-    delay(100);
-  }
-  return success;
+bool beginRequest(HTTPClient& https, const char* url) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  https.setReuse(true);
+  https.setTimeout(15000);
+  if (!https.begin(secureClient, url)) return false;
+  https.addHeader("apikey", supabaseKey);
+  https.addHeader("Authorization", String("Bearer ") + supabaseKey);
+  return true;
 }
 
-void broadcastSMS(String message) {
-  int totalContacts = activePhoneNumbers.size();
-  for (int i = 0; i < totalContacts; i++) {
-    sendSMS(activePhoneNumbers[i], message);
-    if (i < totalContacts - 1) {
-      delay(3000);
-    }
-  }
+// Negative codes = connection problem -> drop the socket so the next call reconnects clean
+void finishRequest(HTTPClient& https, int code) {
+  https.end();
+  if (code < 0) secureClient.stop();
 }
 
 // ========================================================
-// --- FETCH CLOUD CONFIGURATION & CONTACTS ---
+// --- FETCH SETTINGS FROM SUPABASE ---
 // ========================================================
 void fetchCloudData() {
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  WiFiClientSecure client;
-  client.setInsecure();
   HTTPClient https;
+  if (!beginRequest(https, supabaseSettingsUrl)) return;
 
-  // 1. Fetch System Settings
-  if (https.begin(client, supabaseSettingsUrl)) {
-    https.addHeader("apikey", supabaseKey);
-    https.addHeader("Authorization", String("Bearer ") + supabaseKey);
+  int code = https.GET();
+  if (code == 200) {
+    JsonDocument doc;
+    if (!deserializeJson(doc, https.getString())) {
+      for (JsonObject elem : doc.as<JsonArray>()) {
+        String key = elem["setting_key"].as<String>();
+        String val = elem["setting_value"].as<String>();
 
-    int code = https.GET();
-    if (code == 200) {
-      JsonDocument doc;
-      if (!deserializeJson(doc, https.getString())) {
-        for (JsonObject elem : doc.as<JsonArray>()) {
-          String key = elem["setting_key"].as<String>();
-          String val = elem["setting_value"].as<String>();
-
-          if (key == "sync_interval_seconds" && val.toInt() > 0) {
-            syncInterval = val.toInt() * 1000UL;
-          } else if (key == "audio_interval_seconds" && val.toInt() >= 10) {
-            audioInterval = val.toInt() * 1000UL;
-          } else if (key == "bulb_mode") {
-            bulbMode = val; bulbMode.toLowerCase();
-          } else if (key == "solenoid_mode") {
-            solenoidMode = val; solenoidMode.toLowerCase();
-          } else if (key == "solenoid_trigger_temp") {
-            solenoidTriggerTemp = val.toFloat();
-          } else if (key == "bulb_start_hour") {
-            bulbStartHour = val.toInt();
-          } else if (key == "bulb_end_hour") {
-            bulbEndHour = val.toInt();
-          }
-        }
-        // Persist so the farm keeps the last known settings if it reboots offline
-        preferences.putULong("sync_interval", syncInterval);
-        preferences.putULong("audio_interval", audioInterval);
-        preferences.putString("bulb_mode", bulbMode);
-        preferences.putString("sol_mode", solenoidMode);
-        preferences.putFloat("sol_temp", solenoidTriggerTemp);
-        preferences.putInt("bulb_start", bulbStartHour);
-        preferences.putInt("bulb_end", bulbEndHour);
-      }
-    } else {
-      Serial.printf("[SETTINGS] Fetch failed: HTTP %d\n", code);
-    }
-    https.end();
-  }
-
-  // 2. Fetch Active Contacts
-  if (https.begin(client, supabaseContactsUrl)) {
-    https.addHeader("apikey", supabaseKey);
-    https.addHeader("Authorization", String("Bearer ") + supabaseKey);
-
-    if (https.GET() == 200) {
-      JsonDocument doc;
-      if (!deserializeJson(doc, https.getString())) {
-        activePhoneNumbers.clear();
-        for (JsonObject elem : doc.as<JsonArray>()) {
-          String phone = elem["phone_number"].as<String>();
-          if (phone.length() > 0) activePhoneNumbers.push_back(phone);
+        if (key == "sync_interval_seconds" && val.toInt() > 0) {
+          syncInterval = val.toInt() * 1000UL;
+        } else if (key == "audio_interval_seconds" && val.toInt() >= 10) {
+          audioInterval = val.toInt() * 1000UL;
+        } else if (key == "bulb_mode") {
+          bulbMode = val; bulbMode.toLowerCase();
+        } else if (key == "solenoid_mode") {
+          solenoidMode = val; solenoidMode.toLowerCase();
+        } else if (key == "solenoid_trigger_temp") {
+          solenoidTriggerTemp = val.toFloat();
+        } else if (key == "bulb_start_hour") {
+          bulbStartHour = val.toInt();
+        } else if (key == "bulb_end_hour") {
+          bulbEndHour = val.toInt();
         }
       }
+      if (!settingsLoaded) {
+        settingsLoaded = true;
+        Serial.printf("[SETTINGS] Loaded from Supabase: bulb=%s solenoid=%s\n",
+                      bulbMode.c_str(), solenoidMode.c_str());
+      }
     }
-    https.end();
+  } else {
+    Serial.printf("[SETTINGS] Fetch failed: HTTP %d\n", code);
   }
+  finishRequest(https, code);
+}
+
+// ========================================================
+// --- STATUS REPORT (visible in system_settings -> main_status) ---
+// ========================================================
+void reportStatus() {
+  HTTPClient https;
+  if (!beginRequest(https, supabaseStatusUrl)) return;
+  https.addHeader("Content-Type", "application/json");
+  https.addHeader("Prefer", "return=minimal");
+
+  String status = "uptime=" + String(millis() / 60000) + "min"
+                + " heap=" + String(ESP.getFreeHeap())
+                + " minheap=" + String(ESP.getMinFreeHeap())
+                + " block=" + String(ESP.getMaxAllocHeap())
+                + " rssi=" + String(WiFi.RSSI())
+                + " boot=" + bootReason;
+
+  JsonDocument doc;
+  doc["setting_value"] = status;
+  String body;
+  serializeJson(doc, body);
+
+  int code = https.sendRequest("PATCH", body);
+  finishRequest(https, code);
+  Serial.println("[STATUS] " + status);
 }
 
 // ========================================================
@@ -350,28 +349,23 @@ bool recordAudioChunk() {
   file.close();
 
   currentAudioLevel = peak >> 8;
-  Serial.printf("[AUDIO] Recorded %us clip (%u bytes)\n", AUDIO_SECONDS, totalSamples * 2 + 44);
+  Serial.printf("[AUDIO] Recorded %us clip | mic peak level: %d (0 = silence)\n",
+                AUDIO_SECONDS, (int)currentAudioLevel);
   return true;
 }
 
 // Returns the public URL (with cache-buster) on success, "" on failure
 String uploadAudioToSupabase() {
-  if (WiFi.status() != WL_CONNECTED) return "";
   if (!LittleFS.exists(AUDIO_FILE)) return "";
   File file = LittleFS.open(AUDIO_FILE, "r");
   if (!file) return "";
 
   String result = "";
-  WiFiClientSecure client;
-  client.setInsecure();
   HTTPClient https;
-  https.setTimeout(20000);
-
-  if (https.begin(client, supabaseAudioUrl)) {
-    https.addHeader("apikey", supabaseKey);
-    https.addHeader("Authorization", String("Bearer ") + supabaseKey);
+  if (beginRequest(https, supabaseAudioUrl)) {
+    https.setTimeout(20000);
     https.addHeader("Content-Type", "audio/wav");
-    https.addHeader("x-upsert", "true");          // <-- REQUIRED to overwrite the same file
+    https.addHeader("x-upsert", "true");          // REQUIRED to overwrite the same file
     https.addHeader("cache-control", "max-age=0"); // don't let the CDN serve an old clip
 
     int code = https.sendRequest("POST", &file, file.size());
@@ -381,49 +375,48 @@ String uploadAudioToSupabase() {
       result = String(supabaseAudioPublic) + "?t=" + String(stamp);
       Serial.println("[AUDIO] Upload OK");
     } else {
-      Serial.printf("[AUDIO] Upload failed: HTTP %d -> %s\n", code, https.getString().c_str());
+      Serial.printf("[AUDIO] Upload failed: HTTP %d\n", code);
     }
-    https.end();
+    finishRequest(https, code);
   }
   file.close();
   return result;
 }
 
-void uploadTelemetryToSupabase(float ambient, float floor, int audioLvl, bool motion, String audioUrl) {
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  WiFiClientSecure client;
-  client.setInsecure();
+void uploadTelemetryToSupabase(float ambient, float floor, int audioLvl, String audioUrl) {
   HTTPClient https;
-  if (https.begin(client, supabaseSensorUrl)) {
-    https.addHeader("apikey", supabaseKey);
-    https.addHeader("Authorization", String("Bearer ") + supabaseKey);
-    https.addHeader("Content-Type", "application/json");
-    https.addHeader("Prefer", "return=minimal");
+  if (!beginRequest(https, supabaseSensorUrl)) return;
+  https.addHeader("Content-Type", "application/json");
+  https.addHeader("Prefer", "return=minimal");
 
-    JsonDocument doc;
-    doc["ambient_temp"] = ambient;
-    doc["floor_temp"] = floor;
-    doc["audio_level"] = audioLvl;
-    doc["motion_detected"] = motion;
-    // Only rows that carry a NEW clip get an audio_url -> audio_worker.py classifies those
-    if (audioUrl.length() > 0) doc["audio_url"] = audioUrl;
-    else doc["audio_url"] = nullptr;
+  JsonDocument doc;
+  doc["ambient_temp"] = ambient;
+  doc["floor_temp"] = floor;
+  doc["audio_level"] = audioLvl;
+  doc["motion_detected"] = false;   // no PIR installed
+  // Only rows that carry a NEW clip get an audio_url
+  if (audioUrl.length() > 0) doc["audio_url"] = audioUrl;
+  else doc["audio_url"] = nullptr;
 
-    String jsonBody;
-    serializeJson(doc, jsonBody);
-    int code = https.POST(jsonBody);
-    if (code != 201 && code != 200) {
-      Serial.printf("[TELEMETRY] Insert failed: HTTP %d\n", code);
-    }
-    https.end();
+  String jsonBody;
+  serializeJson(doc, jsonBody);
+  int code = https.POST(jsonBody);
+  if (code != 201 && code != 200) {
+    Serial.printf("[TELEMETRY] Insert failed: HTTP %d\n", code);
   }
+  finishRequest(https, code);
 }
 
 // ========================================================
 // --- SYSTEM SETUP ---
 // ========================================================
 void setup() {
+  // Relays OFF first thing, BEFORE switching to output, so nothing clicks ON at boot
+  digitalWrite(RELAY_IN1, RELAY_OFF);
+  digitalWrite(RELAY_IN2, RELAY_OFF);
+  pinMode(RELAY_IN1, OUTPUT);
+  pinMode(RELAY_IN2, OUTPUT);
+
   Serial.begin(115200);
   delay(1000);
 
@@ -432,41 +425,35 @@ void setup() {
   }
 
   preferences.begin("pig_farm", false);
-  syncInterval = preferences.getULong("sync_interval", 15000);
-  audioInterval = preferences.getULong("audio_interval", 60000);
-  bulbMode = preferences.getString("bulb_mode", "auto");
-  solenoidMode = preferences.getString("sol_mode", "auto");
-  solenoidTriggerTemp = preferences.getFloat("sol_temp", 38.0);
-  bulbStartHour = preferences.getInt("bulb_start", 18);
-  bulbEndHour = preferences.getInt("bulb_end", 6);
+
+  // Why did we (re)boot? If it was our own planned restart, show that reason instead
+  bootReason = resetReasonText();
+  if (bootReason == "SOFTWARE_RESTART") {
+    String why = preferences.getString("restart_why", "");
+    if (why.length()) bootReason = "PLANNED:" + why;
+  }
+  preferences.remove("restart_why");
+  Serial.println("[BOOT] Reset reason: " + bootReason);
 
   WiFiManager wm;
   wm.setConfigPortalTimeout(180);
   if (!wm.autoConnect("PigFarm-Setup")) {
-    Serial.println("[WARNING] Wi-Fi setup timed out. Running in Offline Mode.");
+    Serial.println("[WARNING] Wi-Fi setup timed out.");
   } else {
     configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov");
   }
   WiFi.setAutoReconnect(true);
-
-  sim800.begin(9600, SERIAL_8N1, SIM_RX_PIN, SIM_TX_PIN);
-  camSerial.begin(115200, SERIAL_8N1, CAM_RX_PIN, CAM_TX_PIN);
+  secureClient.setInsecure();
 
   Wire.begin(21, 22);
   mlx.begin();
-
-  pinMode(PIR_PIN, INPUT);
-  pinMode(RELAY_IN1, OUTPUT);
-  pinMode(RELAY_IN2, OUTPUT);
-
-  digitalWrite(RELAY_IN1, RELAY_OFF);
-  digitalWrite(RELAY_IN2, RELAY_OFF);
 
   i2sMutex = xSemaphoreCreateMutex();
   setupI2S();
   xTaskCreatePinnedToCore(audioTask, "AudioTask", 4096, NULL, 1, NULL, 0);
 
   fetchCloudData();
+  reportStatus();
   Serial.println("[BOOT] Clean system fully initialized.");
 }
 
@@ -474,17 +461,21 @@ void setup() {
 // --- MAIN LOOP ---
 // ========================================================
 void loop() {
+  // Read the MLX only while the mic is paused (never both at the same time)
+  xSemaphoreTake(i2sMutex, portMAX_DELAY);
   float ambientTemp = mlx.readAmbientTempC();
   float floorTemp = mlx.readObjectTempC();
-  int motionState = digitalRead(PIR_PIN);
+  xSemaphoreGive(i2sMutex);
   float currentMaxTemp = (ambientTemp > floorTemp) ? ambientTemp : floorTemp;
 
   struct tm timeinfo;
   bool hasTime = getLocalTime(&timeinfo, 50);
 
-  // --- 1. HEATING BULB CONTROL ---
+  // --- 1. HEATING BULB CONTROL (follows Supabase) ---
   bool bulbShouldBeOn = false;
-  if (bulbMode == "on") {
+  if (!settingsLoaded) {
+    bulbShouldBeOn = false;
+  } else if (bulbMode == "on") {
     bulbShouldBeOn = true;
   } else if (bulbMode == "off") {
     bulbShouldBeOn = false;
@@ -495,9 +486,11 @@ void loop() {
   }
   digitalWrite(RELAY_IN1, bulbShouldBeOn ? RELAY_ON : RELAY_OFF);
 
-  // --- 2. WATER SOLENOID CONTROL ---
+  // --- 2. WATER SOLENOID CONTROL (follows Supabase) ---
   bool solenoidShouldBeOpen = false;
-  if (solenoidMode == "on") {
+  if (!settingsLoaded) {
+    solenoidShouldBeOpen = false;
+  } else if (solenoidMode == "on") {
     solenoidShouldBeOpen = true;
   } else if (solenoidMode == "off") {
     solenoidShouldBeOpen = false;
@@ -511,50 +504,13 @@ void loop() {
   }
   digitalWrite(RELAY_IN2, solenoidShouldBeOpen ? RELAY_ON : RELAY_OFF);
 
-  // --- 3. ANOMALY DETECTION & EMERGENCY SMS ---
-  bool isHighTempAlert = (currentMaxTemp >= solenoidTriggerTemp);
-  bool isNoiseAlert    = (currentAudioLevel > AUDIO_NOISE_THRESHOLD);
-  bool isMotionAlert   = (motionState == HIGH);
-
-  if (isHighTempAlert || isNoiseAlert || isMotionAlert) {
-    // Tell the ESP32-CAM to save an alert snapshot (rate-limited, with reason)
-    if (millis() - lastSnapCmdTime > SNAP_COOLDOWN_MS || lastSnapCmdTime == 0) {
-      lastSnapCmdTime = millis();
-      String reason = isHighTempAlert ? "TEMP" : (isNoiseAlert ? "NOISE" : "MOTION");
-      camSerial.println("SNAP:" + reason);
-    }
-
-    if (millis() - lastAlertSMSTime > ALERT_COOLDOWN_MS || lastAlertSMSTime == 0) {
-      lastAlertSMSTime = millis();
-      String alertMsg = "🚨 PIG FARM ALERT!\nTemp: " + String(currentMaxTemp, 1) + "C\nNoise: " + String(currentAudioLevel);
-      broadcastSMS(alertMsg);
-    }
-  }
-
-  // --- 4. HOURLY STATUS REPORT ---
-  bool triggerHourlyReport = false;
-  if (hasTime) {
-    if (timeinfo.tm_hour != lastReportedHour) {
-      triggerHourlyReport = true;
-      lastReportedHour = timeinfo.tm_hour;
-    }
-  } else if (millis() - lastHourlySMSFallback > ONE_HOUR_MS) {
-    triggerHourlyReport = true;
-    lastHourlySMSFallback = millis();
-  }
-
-  if (triggerHourlyReport) {
-    String hourlyMsg = "📋 HOURLY STATUS\nTemp: " + String(currentMaxTemp, 1) + "C\nBulb: " + (bulbShouldBeOn ? "ON" : "OFF") + "\nSolenoid: " + (solenoidShouldBeOpen ? "OPEN" : "CLOSED");
-    broadcastSMS(hourlyMsg);
-  }
-
-  // --- 5. CLOUD SETTINGS SYNC (Every 10s) ---
+  // --- 3. CLOUD SETTINGS SYNC (Every 10s) ---
   if (millis() - lastSettingsFetch > settingsFetchInterval) {
     lastSettingsFetch = millis();
     fetchCloudData();
   }
 
-  // --- 6. PERIODIC TELEMETRY SYNC (Every 15s) + AUDIO CLIP (Every 60s) ---
+  // --- 4. PERIODIC TELEMETRY SYNC (Every 15s) + AUDIO CLIP (Every 60s) ---
   if (millis() - lastSyncUpdate > syncInterval) {
     lastSyncUpdate = millis();
 
@@ -567,12 +523,14 @@ void loop() {
       }
     }
 
-    uploadTelemetryToSupabase(ambientTemp, floorTemp, currentAudioLevel, motionState, newAudioUrl);
+    uploadTelemetryToSupabase(ambientTemp, floorTemp, currentAudioLevel, newAudioUrl);
   }
 
-  // Only listen to SIM800L module responses
-  while (sim800.available()) {
-    Serial.write(sim800.read());
+  // --- 5. HEALTH REPORT + MEMORY GUARD (Every 60s) ---
+  if (millis() - lastStatusReport > STATUS_INTERVAL_MS) {
+    lastStatusReport = millis();
+    reportStatus();
+    checkHeap();
   }
 
   delay(500);

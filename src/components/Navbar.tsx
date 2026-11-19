@@ -1,10 +1,10 @@
 import React from 'react';
 import pigLogo from '../assets/pig-logo.png';
-import { LayoutDashboard, Database, PhoneCall, Settings, DatabaseZap } from 'lucide-react';
+import { LayoutDashboard, Database, PhoneCall, Settings, DatabaseZap, AudioWaveform } from 'lucide-react';
 
 interface NavbarProps {
-  activeTab: 'overview' | 'logs' | 'contacts' | 'settings';
-  setActiveTab: (tab: 'overview' | 'logs' | 'contacts' | 'settings') => void;
+  activeTab: 'overview' | 'logs' | 'contacts' | 'tester' | 'settings';
+  setActiveTab: (tab: 'overview' | 'logs' | 'contacts' | 'tester' | 'settings') => void;
   isMock: boolean;
   onOpenConfig: () => void;
   activeContactsCount: number;
@@ -62,6 +62,13 @@ export const Navbar: React.FC<NavbarProps> = ({
             <PhoneCall className="tab-icon" />
             <span>Contacts</span>
             <span className="tab-badge">{activeContactsCount}</span>
+          </button>
+          <button
+            className={`nav-tab ${activeTab === 'tester' ? 'active' : ''}`}
+            onClick={() => setActiveTab('tester')}
+          >
+            <AudioWaveform className="tab-icon" />
+            <span>Cough Tester</span>
           </button>
           <button
             className={`nav-tab ${activeTab === 'settings' ? 'active' : ''}`}

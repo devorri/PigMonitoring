@@ -32,6 +32,40 @@ An intelligent IoT and Precision Livestock Farming (PLF) monitoring system for p
 
 ---
 
+## 🍓 Raspberry Pi 4 AI Engine (`pi/`)
+
+The AI now runs on a **Raspberry Pi 4** instead of the browser / PC:
+
+```
+ESP32-CAM ──USB──> Raspberry Pi 4 ──> Supabase ──> Website
+MLX90614  ──I2C──>   • YOLOv8 pig/piglet detection + moving/resting tracking
+INMP441   ──I2S──>   • Non-stop audio cough/stress model (every 1s)
+Relays   <──GPIO──   • Temperatures, heating bulb + water solenoid, sensor_logs
+(The main ESP32 is no longer used)
+```
+
+| Part | What it does |
+|------|--------------|
+| `firmware/pig_esp32cam` | ESP32-CAM is now a **USB camera** for the Pi (no Wi-Fi). Sits on the ESP32-CAM-MB board. |
+| `firmware/pig_main_esp32` | **Not used anymore** (sensors, mic and relays are on the Pi now). Kept for reference. |
+| `pi/app.py` | Camera AI (`best.onnx` -> `snap/live_*.jpg` + `snap/live.json`), non-stop mic AI (`pig_audio.onnx` -> `audio_detections` + `audio/periodic_sound.wav`), MLX90614 temps, relays from Supabase settings, `sensor_logs`, `cam_status` + `pi_status`. Wiring is in the top of the file. |
+| Website "Pen" mode | Shows the Pi's image + boxes from `snap/live.json` (Webcam / Video modes still run YOLO in the browser). |
+
+### Setup
+1. Run `supabase_pi_setup.sql` in the Supabase SQL Editor.
+2. Flash `firmware/pig_esp32cam` to the ESP32-CAM, put it on the ESP32-CAM-MB board, plug it into the Pi.
+3. Copy this project to the Pi (Raspberry Pi OS **64-bit**), then:
+   ```bash
+   cd PigMonitoringSystem/pi
+   bash install.sh
+   journalctl -u pigmonitor -f      # live logs
+   ```
+4. Settings on the website: `cam_live_enabled`, `cam_live_interval_seconds` (2-60), `cam_flash` (off / on / night).
+
+Don't run `audio_worker.py` on the PC anymore, the Pi does the audio now.
+
+---
+
 ## 📦 File Structure
 
 ```

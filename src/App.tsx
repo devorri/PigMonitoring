@@ -4,6 +4,7 @@ import { DashboardOverview } from './components/DashboardOverview';
 import { SensorLogsView } from './components/SensorLogsView';
 import { ContactsView } from './components/ContactsView';
 import { SystemSettingsView } from './components/SystemSettingsView';
+import { AudioTesterView } from './components/AudioTesterView';
 import { SupabaseConfigModal } from './components/SupabaseConfigModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import type { 
@@ -29,7 +30,7 @@ import {
 import { CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'logs' | 'contacts' | 'settings'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'logs' | 'contacts' | 'tester' | 'settings'>('overview');
   
   // Data States
   const [logs, setLogs] = useState<SensorLog[]>([]);
@@ -271,6 +272,8 @@ export function App() {
                 onDeleteContact={handleDeleteContact}
               />
             )}
+
+            {activeTab === 'tester' && <AudioTesterView settings={settings} />}
 
             {activeTab === 'settings' && (
               <SystemSettingsView

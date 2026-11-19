@@ -21,11 +21,24 @@ import {
 } from 'lucide-react';
 
 const SUPABASE_PUBLIC_URL = import.meta.env.VITE_SUPABASE_URL || 'https://rembfnigpvtuxoyjjexf.supabase.co';
-// ESP32-CAM overwrites this file every ~2s (see firmware/pig_esp32cam)
-const LIVE_CAMERA_FEED_BASE = `${SUPABASE_PUBLIC_URL}/storage/v1/object/public/snap/live.jpg`;
-const LIVE_CAMERA_FEED_URL = `${LIVE_CAMERA_FEED_BASE}?t=${Date.now()}`;
+// The Raspberry Pi (pi/app.py) gets frames from the ESP32-CAM over USB, runs YOLO + tracking,
+// then uploads snap/live_0.jpg / live_1.jpg (alternating) and snap/live.json (newest image + detections)
+const LIVE_STORAGE_BASE = `${SUPABASE_PUBLIC_URL}/storage/v1/object/public/snap`;
+const LIVE_JSON_URL = `${LIVE_STORAGE_BASE}/live.json`;
+const LIVE_CAMERA_FEED_URL = `${LIVE_STORAGE_BASE}/live_0.jpg?t=${Date.now()}`;
 const LIVE_REFRESH_MS = 2000;
+const LIVE_STALE_MS = 30000; // no new frame from the Pi for 30s -> show "AI offline"
+// Browser model is only used for the PC Webcam / uploaded Video modes now
 const PIG_MODEL_URL = '/models/best.onnx';
+
+interface PiLiveFrame {
+  t: number;              // ms timestamp when the Pi processed the frame
+  image: string;          // live_0.jpg or live_1.jpg
+  width: number;
+  height: number;
+  infer_ms: number;
+  detections: TrackedPig[];
+}
 
 export interface TrackedPig {
   id: number;
@@ -208,18 +221,43 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   const nextTrackIdRef = useRef<number>(1);
   const [aiStatus, setAiStatus] = useState<'loading' | 'ready' | 'blocked'>('loading');
 
-  // ESP32-CAM live feed: preload the newest frame, swap only when it loaded (no flicker)
+  // Pen camera via the Raspberry Pi: read live.json, preload the image it points to,
+  // then swap image + boxes together (no flicker, boxes always match the picture)
   useEffect(() => {
     if (feedMode !== 'stream') return;
     let cancelled = false;
-    const refresh = () => {
-      const nextUrl = `${LIVE_CAMERA_FEED_BASE}?t=${Date.now()}`;
-      const preload = new Image();
-      preload.crossOrigin = 'anonymous';
-      preload.onload = () => {
-        if (!cancelled) setCameraFeedUrl(nextUrl);
-      };
-      preload.src = nextUrl;
+    let lastFrameTime = 0;
+
+    const refresh = async () => {
+      try {
+        const res = await fetch(`${LIVE_JSON_URL}?t=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const frame = (await res.json()) as PiLiveFrame;
+        if (cancelled) return;
+
+        const isStale = Date.now() - frame.t > LIVE_STALE_MS;
+        if (frame.t === lastFrameTime) {
+          if (isStale) setAiStatus('blocked');
+          return;
+        }
+        lastFrameTime = frame.t;
+
+        const nextUrl = `${LIVE_STORAGE_BASE}/${frame.image}?t=${frame.t}`;
+        const preload = new Image();
+        preload.crossOrigin = 'anonymous';
+        preload.onload = () => {
+          if (cancelled) return;
+          setCameraFeedUrl(nextUrl);
+          setPigDetections(Array.isArray(frame.detections) ? frame.detections : []);
+          setAiStatus(isStale ? 'blocked' : 'ready');
+        };
+        preload.src = nextUrl;
+      } catch {
+        if (!cancelled) {
+          setPigDetections([]);
+          setAiStatus('blocked');
+        }
+      }
     };
     refresh();
     const timer = window.setInterval(refresh, LIVE_REFRESH_MS);
@@ -256,10 +294,15 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
     };
   }, [feedMode]);
 
+  // Browser YOLO: only for the PC Webcam / uploaded Video modes.
+  // The pen camera ("Pen" mode) is analyzed on the Raspberry Pi.
   useEffect(() => {
+    if (feedMode === 'stream') return;
     let cancelled = false;
     let detecting = false;
     let session: ort.InferenceSession | null = null;
+    let clearedOldBoxes = false;
+    previousTracksRef.current = [];
 
     const intersectionOverUnion = (
       first: [number, number, number, number],
@@ -281,14 +324,18 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
         if (vid && vid.readyState >= 2 && !vid.paused && !vid.ended) {
           mediaSource = vid;
         }
-      } else {
-        const img = cameraImageRef.current;
-        if (img && img.complete && img.naturalWidth > 0) {
-          mediaSource = img;
-        }
       }
 
-      if (!mediaSource || detecting) return;
+      if (!mediaSource) {
+        // Clear boxes left over from the previous mode until this source is ready
+        if (!clearedOldBoxes && !cancelled) {
+          clearedOldBoxes = true;
+          setPigDetections([]);
+          setAiStatus('loading');
+        }
+        return;
+      }
+      if (detecting) return;
 
       detecting = true;
       try {
@@ -461,8 +508,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
     };
 
     detectPigs();
-    const intervalMs = feedMode === 'stream' ? 1500 : 250;
-    const timer = window.setInterval(detectPigs, intervalMs);
+    const timer = window.setInterval(detectPigs, 250);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
