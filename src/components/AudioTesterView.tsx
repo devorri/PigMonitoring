@@ -98,7 +98,13 @@ export const AudioTesterView: React.FC<AudioTesterViewProps> = ({ settings }) =>
       const session = await loadAudioModel((loaded, total) => setProgress(total ? loaded / total : 0));
       setStage('analyzing');
       setProgress(0);
-      const r = await analyzeAudio(session, x, st, setProgress);
+      let r = await analyzeAudio(session, x, st, setProgress);
+      // If an uploaded/recorded clip had quiet parts skipped and 0 coughs were found,
+      // automatically check all windows so quiet phone/web recordings still detect coughs & trigger SMS.
+      if (st.useGate && r.coughs.length === 0 && r.quietShare > 0) {
+        setUseGate(false);
+        r = await analyzeAudio(session, x, { ...st, useGate: false }, setProgress);
+      }
       setResult(r);
       setStage('done');
       if (smsName && smsOnCough && r.coughs.length > 0) void sendCoughSms(r, smsName);
@@ -190,7 +196,7 @@ export const AudioTesterView: React.FC<AudioTesterViewProps> = ({ settings }) =>
   const rerun = (override?: Partial<CoughSettings>) => {
     if (!samples) return;
     if (override?.useGate !== undefined) setUseGate(override.useGate);
-    void run(samples, { ...effective, ...override });
+    void run(samples, { ...effective, ...override }, fileName ?? 'audio');
   };
 
   const busy = stage === 'model' || stage === 'decoding' || stage === 'analyzing';

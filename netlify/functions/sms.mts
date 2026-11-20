@@ -19,8 +19,16 @@ interface SmsRequest {
 
 const SEMAPHORE_URL = 'https://api.semaphore.co/api/v4/messages';
 
-function env(name: string): string {
-  return (process.env[name] ?? '').trim();
+// Fallback defaults (same as .env, src/lib/supabase.ts, and pi/app.py) so Netlify Functions
+// work out-of-the-box even when Netlify Dashboard environment variables are not manually set.
+const DEFAULT_SUPABASE_URL = 'https://rembfnigpvtuxoyjjexf.supabase.co';
+const DEFAULT_SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJlbWJmbmlncHZ0dXhveWpqZXhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg2NDUzMTksImV4cCI6MjEwNDIyMTMxOX0.HIZvxN9LRPQl_9vh-bY1rqaMbh2mHhvGWIqZrR9ZftA';
+const DEFAULT_SEMAPHORE_API_KEY = 'f18fe7eb9f2f4b5477776b98d8b55565';
+const DEFAULT_SEMAPHORE_SENDER = 'TranslertPH';
+
+function env(name: string, fallback = ''): string {
+  return (process.env[name] ?? '').trim() || fallback;
 }
 
 function normalizePhNumber(raw: unknown): string | null {
@@ -66,8 +74,8 @@ function buildMessage(req: SmsRequest): string {
 }
 
 async function supabase(path: string, init: RequestInit = {}) {
-  const url = env('VITE_SUPABASE_URL') || env('SUPABASE_URL');
-  const key = env('VITE_SUPABASE_ANON_KEY') || env('SUPABASE_KEY');
+  const url = env('VITE_SUPABASE_URL') || env('SUPABASE_URL') || DEFAULT_SUPABASE_URL;
+  const key = env('VITE_SUPABASE_ANON_KEY') || env('SUPABASE_KEY') || DEFAULT_SUPABASE_ANON_KEY;
   if (!url || !key) throw new Error('Supabase URL / anon key missing in env');
   return fetch(`${url.replace(/\/$/, '')}/rest/v1/${path}`, {
     ...init,
@@ -93,7 +101,7 @@ export default async function handler(request: Request): Promise<Response> {
     kind = body.kind;
     message = buildMessage(body);
 
-    const apiKey = env('SEMAPHORE_API_KEY');
+    const apiKey = env('SEMAPHORE_API_KEY', DEFAULT_SEMAPHORE_API_KEY);
     if (!apiKey) throw new Error('SEMAPHORE_API_KEY is not set for the website');
 
     const res = await supabase('contacts?select=name,phone_number&is_active=eq.true');
@@ -103,7 +111,7 @@ export default async function handler(request: Request): Promise<Response> {
     if (numbers.length === 0) throw new Error('No active contacts with a valid PH mobile number');
 
     const form = new URLSearchParams({ apikey: apiKey, number: numbers.join(','), message });
-    const sender = env('SEMAPHORE_SENDER');
+    const sender = env('SEMAPHORE_SENDER', DEFAULT_SEMAPHORE_SENDER);
     if (sender) form.set('sendername', sender);
     const sem = await fetch(SEMAPHORE_URL, { method: 'POST', body: form });
     const fullText = await sem.text();                  // parse the WHOLE reply, keep only 500 chars for the log
@@ -145,5 +153,5 @@ export default async function handler(request: Request): Promise<Response> {
   return json(status === 'sent' ? 200 : 400, { ok: status === 'sent', status, error, numbers, message });
 }
 
-// Netlify: serve this at /api/sms (takes priority over the SPA redirect in netlify.toml)
-export const config = { path: '/api/sms' };
+// Netlify: serve this at /api/sms and /.netlify/functions/sms (takes priority over the SPA redirect in netlify.toml)
+export const config = { path: ['/api/sms', '/.netlify/functions/sms'] };

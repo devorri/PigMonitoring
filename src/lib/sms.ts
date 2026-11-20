@@ -34,25 +34,44 @@ export interface WebSmsResult {
   message: string;
 }
 
-/** Sends through /api/sms (Netlify Function online, Vite dev server locally). */
+/** Sends through /api/sms (or /.netlify/functions/sms fallback on Netlify). */
 export async function sendSmsFromWeb(
   kind: WebSmsKind,
   message?: string,
   extra?: { coughs?: number; best?: number; file?: string },
 ): Promise<WebSmsResult> {
-  try {
-    const res = await fetch('/api/sms', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ kind, message, ...extra }),
-    });
-    const text = await res.text();
+  const payload = JSON.stringify({ kind, message, ...extra });
+  const endpoints = ['/api/sms', '/.netlify/functions/sms'];
+  let lastStatus = 0;
+
+  for (const endpoint of endpoints) {
     try {
-      return JSON.parse(text) as WebSmsResult;
-    } catch {
-      return { ok: false, error: `SMS endpoint not available (HTTP ${res.status}). Is /api/sms deployed?`, numbers: [], message: '' };
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      });
+      lastStatus = res.status;
+      const text = await res.text();
+      try {
+        const parsed = JSON.parse(text) as WebSmsResult;
+        if (parsed && typeof parsed.ok === 'boolean') {
+          return parsed;
+        }
+      } catch {
+        // Endpoint returned HTML (SPA fallback) or non-JSON; try next endpoint
+      }
+    } catch (e) {
+      if (endpoint === endpoints[endpoints.length - 1]) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e), numbers: [], message: '' };
+      }
     }
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e), numbers: [], message: '' };
   }
+
+  return {
+    ok: false,
+    error: `SMS endpoint not available (HTTP ${lastStatus}). Redeploy the latest build to Netlify.`,
+    numbers: [],
+    message: '',
+  };
 }
